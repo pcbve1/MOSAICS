@@ -351,11 +351,87 @@ class RandomTemplateIterator(BaseTemplateIterator):
     coherent_removal : bool
         If 'True', remove atoms from residues in order. For example, would remove atoms
         from residue [i, i+1, i+2, ...] rather than random indices. Default is 'True'.
+    num_atoms_removed : int
+        Number of atoms to remove from the structure at each iteration.
+        Must be greater than 0.
+    num_alternate_structures : int
+        Number of alternate structures to generate by removing random atoms. Must be
+        greater than 0.
     """
 
     type: ClassVar[Literal["random"]] = "random"
     coherent_removal: bool = True
+    num_atoms_removed: Annotated[int, Field(gt=0)]
+    num_alternate_structures: Annotated[int, Field(gt=0)]
 
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+
+        # Add dummy column to keep track of the original indexes
+        self.structure_df["original_index"] = self.structure_df.index
+
+    def chain_residue_iter(self) -> Iterator[tuple[list[str], list[int]]]:
+        """Generator for iteration of the chain, residue pairs in the structure."""
+        raise NotImplementedError("Use 'atom_idx_iter' for random removal.")
+
+    def atom_idx_iter(self, inverted: bool = False) -> Iterator[torch.Tensor]:
+        """Generator for iterating over atom indexes to keep in each structure.
+
+        Since this class iterates over atoms in the structure (only the specified atom
+        types) randomly, each iteration will yield atoms from multiple different chains.
+
+        Parameters
+        ----------
+        inverted : bool
+            If 'True', return the indexes of atoms to remove rather than keep.
+
+        Yields
+        ------
+        torch.Tensor
+            Tensor of indexes for the atoms to remove.
+        """
+        keep_residues = []
+        keep_atoms = []
+        if "amino_acid" in self.residue_types:
+            keep_residues.extend(AMINO_ACID_RESIDUES)
+            keep_atoms.extend(self.amino_acid_atoms)
+        if "rna" in self.residue_types:
+            keep_residues.extend(RNA_RESIDUES)
+            keep_atoms.extend(self.rna_atoms)
+        if "dna" in self.residue_types:
+            keep_residues.extend(DNA_RESIDUES)
+            keep_atoms.extend(self.dna_atoms)
+
+        # Subset the df to only residues that match the desired residue types
+        # AND to keep only the desired atom types
+        subset_df = self.structure_df[self.structure_df["residue"].isin(keep_residues)]
+        subset_df = subset_df[subset_df["atom"].isin(keep_atoms)]
+
+        for _ in range(self.num_alternate_structures):
+            # If coherent removal, then choose a random starting index and remove a chunk
+            if self.coherent_removal:
+                start_idx = np.random.randint(
+                    0, len(subset_df) - self.num_atoms_removed + 1
+                )
+                df_window = subset_df.iloc[
+                    start_idx : start_idx + self.num_atoms_removed
+                ]
+            else:  # If not coherent removal, then choose random indexes to remove
+                random_idxs = np.random.choice(
+                    subset_df.index,
+                    size=min(self.num_atoms_removed, len(subset_df)),
+                    replace=False,
+                )
+                df_window = subset_df.loc[random_idxs]
+
+            # Get the original indexes of the structure (rather than the window indexes)
+            df_window = df_window.set_index("original_index")
+            atom_idxs = df_window.index
+
+            if inverted:
+                atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+
+            yield torch.tensor(atom_idxs)
 
 class ChainTemplateIterator(BaseTemplateIterator):
     """Iterates over each chain in the structure and remove it in its entirety.

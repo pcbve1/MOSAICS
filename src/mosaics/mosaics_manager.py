@@ -225,11 +225,15 @@ class MosaicsManager(BaseModel):
 
         # The chains and residues removed for each alternate mode (for metadata)
         # Also used to infer the number of iterations for the tqdm object.
-        chain_residue_iterator = self.template_iterator.chain_residue_iter()
-        alternate_chain_residue_pairs = [
-            list(zip(*pair)) for pair in list(chain_residue_iterator)
-        ]
-        num_iters = len(alternate_chain_residue_pairs)
+        if self.template_iterator.type != "random":
+            chain_residue_iterator = self.template_iterator.chain_residue_iter()
+            alternate_chain_residue_pairs = [
+                list(zip(*pair)) for pair in list(chain_residue_iterator)
+            ]
+            num_iters = len(alternate_chain_residue_pairs)
+        else:
+            alternate_chain_residue_pairs = []
+            num_iters = self.template_iterator.num_alternate_structures
 
         # NOTE: When the inverted flag is set to True, the iterator will return the
         # indices of the atoms that should NOT be removed. This is opposite of the

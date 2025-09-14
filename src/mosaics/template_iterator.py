@@ -196,7 +196,9 @@ def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
     """Factory function for instantiating a template iterator object."""
     iterator_type = data.pop("type", None)
     if iterator_type == "random":
-        return RandomTemplateIterator(**data)
+        return RandomAtomTemplateIterator(**data)
+    elif iterator_type == "random_residue":
+        return RandomResidueTemplateIterator(**data)
     elif iterator_type == "chain":
         return ChainTemplateIterator(**data)
     elif iterator_type == "residue":
@@ -323,25 +325,23 @@ class BaseTemplateIterator(BaseModel):
 
         return total_mass
 
-    def get_alternate_template_mass(self) -> Sequence[float]:
+    def get_alternate_template_mass(
+        self, atom_idxs: np.ndarray | torch.Tensor
+    ) -> float:
         """Get the mass (in amu) of all the alternate template structures."""
-        alt_masses = []
-        for atom_idxs in self.atom_idx_iter(inverted=False):
-            atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
-            total_mass = 0
-            for atom, count in atom_counts.items():
-                if atom not in MASS_DICT:
-                    raise ValueError(f"Unknown atom type: {atom}")
+        atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
+        total_mass = 0
+        for atom, count in atom_counts.items():
+            if atom not in MASS_DICT:
+                raise ValueError(f"Unknown atom type: {atom}")
 
-                mass = MASS_DICT[atom]
-                total_mass += mass * count
+            mass = MASS_DICT[atom]
+            total_mass += mass * count
 
-            alt_masses.append(total_mass)
-
-        return alt_masses
+        return total_mass
 
 
-class RandomTemplateIterator(BaseTemplateIterator):
+class RandomAtomTemplateIterator(BaseTemplateIterator):
     """Template iterator for removing random atoms from a pdb structure.
 
     Attributes
@@ -372,7 +372,11 @@ class RandomTemplateIterator(BaseTemplateIterator):
 
     def chain_residue_iter(self) -> Iterator[tuple[list[str], list[int]]]:
         """Generator for iteration of the chain, residue pairs in the structure."""
-        raise NotImplementedError("Use 'atom_idx_iter' for random removal.")
+        # NOTE: This method returns empty lists since this class does not iterate
+        # over chains or residues. It is only implemented to satisfy the abstract
+        # base class requirement.
+        for _ in range(self.num_alternate_structures):
+            yield None
 
     def atom_idx_iter(self, inverted: bool = False) -> Iterator[torch.Tensor]:
         """Generator for iterating over atom indexes to keep in each structure.
@@ -433,6 +437,7 @@ class RandomTemplateIterator(BaseTemplateIterator):
 
             yield torch.tensor(atom_idxs)
 
+
 class ChainTemplateIterator(BaseTemplateIterator):
     """Iterates over each chain in the structure and remove it in its entirety.
 
@@ -457,6 +462,11 @@ class ChainTemplateIterator(BaseTemplateIterator):
 
         # Add dummy column to keep track of the original indexes
         self.structure_df["original_index"] = self.structure_df.index
+
+    @property
+    def num_alternate_structures(self) -> int:
+        """Get the number of alternate structures (i.e. number of chains)."""
+        return len(self.structure_df["chain"].unique())
 
     def chain_residue_iter(self) -> Iterator[tuple[list[str], list[int]]]:
         """Generator for iterating over the chain, residue pairs in the structure.
@@ -599,6 +609,17 @@ class ResidueTemplateIterator(BaseTemplateIterator):
 
         self._chain_order = chain_order
 
+    @property
+    def num_alternate_structures(self) -> int:
+        """Get the number of alternate structures (i.e. number of chains)."""
+        # Find the number of unique (chain, residue_id) pairs
+        cr_pairs = self.chain_residue_pairs()
+        num_pairs = len(cr_pairs)
+        if num_pairs == 0:
+            return 0
+
+        return (num_pairs - 1) // self.residue_increment + 1
+
     def chain_residue_pairs(self) -> list[tuple[str, int]]:
         """Get the (chain, residue) pairs for the structure.
 
@@ -707,6 +728,67 @@ class ResidueTemplateIterator(BaseTemplateIterator):
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
 
             yield torch.tensor(atom_idxs)
+
+
+class RandomResidueTemplateIterator(ResidueTemplateIterator):
+    """Template iterator for removing random residues from a pdb structure.
+
+    Attributes
+    ----------
+    type : Literal["random_residue"]
+        Discriminator field for differentiating between template iterator types.
+    coherent_removal : bool
+        If 'True', remove residues in order. For example, would remove residues
+        [i, i+1, i+2, ...] rather than random indices. Default is 'True'.
+    num_residues_removed : int
+        Number of residues to remove from the structure at each iteration.
+        Must be greater than 0.
+    num_alternate_structures : int
+        Number of alternate structures to generate by removing random residues. Must be
+        greater than 0.
+    """
+
+    type: ClassVar[Literal["random_residue"]] = "random_residue"
+    coherent_removal: bool = True
+    _num_alternate_structures: int
+
+    def __init__(self, num_alternate_structures: int, **data: Any):
+        super().__init__(**data)
+
+        self._num_alternate_structures = num_alternate_structures
+        # Add dummy column to keep track of the original indexes
+        self.structure_df["original_index"] = self.structure_df.index
+        
+    @property
+    def num_alternate_structures(self) -> int:
+        """Get the number of alternate structures (i.e. number of chains)."""
+        return self._num_alternate_structures
+
+    def chain_residue_iter(self) -> Iterator[tuple[list[str], list[int]]]:
+        """Generator for iteration of the chain, residue pairs in the structure."""
+        chain_res_pairs = self.chain_residue_pairs()
+
+        if self.coherent_removal:
+            start_indexes = np.random.randint(
+                0,
+                len(chain_res_pairs) - self.num_residues_removed + 1,
+                size=self.num_alternate_structures,
+            )
+            for start_idx in start_indexes:
+                window = np.arange(start_idx, start_idx + self.num_residues_removed)
+                chains_window = [chain_res_pairs[i][0] for i in window]
+                residues_window = [chain_res_pairs[i][1] for i in window]
+                yield chains_window, residues_window
+        else:
+            for _ in range(self.num_alternate_structures):
+                random_idxs = np.random.choice(
+                    len(chain_res_pairs),
+                    size=min(self.num_residues_removed, len(chain_res_pairs)),
+                    replace=False,
+                )
+                chains_window = [chain_res_pairs[i][0] for i in random_idxs]
+                residues_window = [chain_res_pairs[i][1] for i in random_idxs]
+                yield chains_window, residues_window
 
 
 # class PrecalculatedVolumesTemplateIterator(BaseTemplateIterator):

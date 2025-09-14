@@ -1,6 +1,7 @@
 """Manager class for running MOSAICS."""
 
 from typing import Literal, Union
+import warnings
 
 import mmdf
 import numpy as np
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 from ttsim3d.models import Simulator
 
 from .cross_correlation_core import cross_correlate_particle_stack
-from .mosaics_result import MosaicsResult
+from .mosaics_result import MosaicsResult, AlternateTemplateResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
 
 
@@ -86,7 +87,7 @@ class MosaicsManager(BaseModel):
         projective_filters: torch.Tensor,
         default_volume: torch.Tensor,
         atom_indices: torch.Tensor,
-        gpu_id: Union[Literal["cpu"], int],
+        device: torch.device,
         batch_size: int = 2048,
     ) -> torch.Tensor:
         """Inner loop function for running the MOSAICS program.
@@ -103,14 +104,15 @@ class MosaicsManager(BaseModel):
             The default (full-length) volume to compare against.
         atom_indices : torch.Tensor
             Which atoms should be removed from the template for the alternate model.
-        gpu_id : int
-            The GPU ID to use for the calculations. Should either be "cpu" or a
-            non-negative integer.
+        device : torch.device
+            The device to use for the computation. Should be either a CPU or GPU device.
         batch_size : int, optional
             The batch size to use for the cross-correlation calculations. Default is
             2048.
         """
-        alternate_volume = self.simulator.run(device=gpu_id, atom_indices=atom_indices)
+        alternate_volume = self.simulator.run(
+            device=str(device), atom_indices=atom_indices
+        )
 
         # Subtract the alternate_volume from the default_volume if
         # self.sim_only_removed_atoms is set.
@@ -137,36 +139,32 @@ class MosaicsManager(BaseModel):
 
         return alt_cc
 
-    def run_mosaics(
-        self, gpu_id: Union[Literal["cpu"], int], batch_size: int = 2048
-    ) -> MosaicsResult:
-        """Run the MOSAICS program.
+    def _setup_mosaics_variables(
+        self, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Set up necessary variables for running MOSAICS.
 
         Parameters
         ----------
-        gpu_id : Union[Literal["cpu"], int]
-            The GPU ID to use for the computation. Can either be the string "cpu" to
-            use the CPU, or an integer specifying the GPU ID. All other values are
-            invalid.
-        batch_size : int, optional
-            The batch size -- number of particle images to process at once -- to use
-            for the cross-correlation calculations. The default is 2048.
-        """
-        if gpu_id == "cpu":
-            device = torch.device("cpu")
-        elif isinstance(gpu_id, int) and gpu_id >= 0:
-            device = torch.device(f"cuda:{gpu_id}")
-        else:
-            raise ValueError(
-                f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
-            )
+        device : torch.device
+            The device to use for the computation. Can only be a single device.
 
-        ################################################################
-        ### 0. Do necessary data extraction and pre-processing steps ###
-        ################################################################
+        Returns
+        -------
+        rot_mat : torch.Tensor
+            The rotation matrices for the orientations of each particle.
+        projective_filters : torch.Tensor
+            The projection filters for each particle image.
+        particle_images_dft : torch.Tensor
+            The DFT of the particle images. Pre-processed and normalized.
+        default_template : torch.Tensor
+            The default (full-length) volume to compare against.
+        default_template_dft : torch.Tensor
+            The DFT of the default (full-length) volume.
+        """
 
         # Simulate the default (full-length) template volume
-        default_template = self.simulator.run(device=gpu_id)
+        default_template = self.simulator.run(device=str(device))
 
         # Use the built-in processing functionality from Leopard-EM to compute
         # the filtered particle images (in Fourier space) and the projective filters.
@@ -205,6 +203,46 @@ class MosaicsManager(BaseModel):
         particle_images_dft = particle_images_dft.to(device)
         default_template_dft = default_template_dft.to(device)
 
+        return (
+            rot_mat,
+            projective_filters,
+            particle_images_dft,
+            default_template,
+            default_template_dft,
+        )
+
+    def run_mosaics(
+        self, gpu_id: Union[Literal["cpu"], int], batch_size: int = 2048
+    ) -> MosaicsResult:
+        """Run the MOSAICS program.
+
+        Parameters
+        ----------
+        gpu_id : Union[Literal["cpu"], int]
+            The GPU ID to use for the computation. Can either be the string "cpu" to
+            use the CPU, or an integer specifying the GPU ID. All other values are
+            invalid.
+        batch_size : int, optional
+            The batch size -- number of particle images to process at once -- to use
+            for the cross-correlation calculations. The default is 2048.
+        """
+        if gpu_id == "cpu":
+            device = torch.device("cpu")
+        elif isinstance(gpu_id, int) and gpu_id >= 0:
+            device = torch.device(f"cuda:{gpu_id}")
+        else:
+            raise ValueError(
+                f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
+            )
+
+        (
+            rot_mat,
+            projective_filters,
+            particle_images_dft,
+            default_template,
+            default_template_dft,
+        ) = self._setup_mosaics_variables(device=device)
+
         #####################################################
         ### 1. Calculate default (full length) cross corr ###
         #####################################################
@@ -219,66 +257,62 @@ class MosaicsManager(BaseModel):
         )
         default_cc = torch.max(default_cc.view(default_cc.shape[0], -1), dim=-1).values
 
+        default_mass = self.template_iterator.get_default_template_mass()
+
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
         ######################################################
 
-        # The chains and residues removed for each alternate mode (for metadata)
-        # Also used to infer the number of iterations for the tqdm object.
-        if self.template_iterator.type != "random":
-            chain_residue_iterator = self.template_iterator.chain_residue_iter()
-            alternate_chain_residue_pairs = [
-                list(zip(*pair)) for pair in list(chain_residue_iterator)
-            ]
-            num_iters = len(alternate_chain_residue_pairs)
-        else:
-            alternate_chain_residue_pairs = []
-            num_iters = self.template_iterator.num_alternate_structures
+        num_iters = self.template_iterator.num_alternate_structures
 
         # NOTE: When the inverted flag is set to True, the iterator will return the
         # indices of the atoms that should NOT be removed. This is opposite of the
         # the 'sim_removed_atoms_only' flag.
         inverted = not self.sim_removed_atoms_only
+        chain_residue_iterator = self.template_iterator.chain_residue_iter()
         atom_idx_iterator = self.template_iterator.atom_idx_iter(inverted=inverted)
 
-        alternate_ccs = []
-        for atom_indices in tqdm.tqdm(
-            atom_idx_iterator,
+        alternate_template_results = []
+        for atom_indices, chain_reside_pairs in tqdm.tqdm(
+            zip(atom_idx_iterator, chain_residue_iterator),
             total=num_iters,
             desc="Iterating over alternate models",
         ):
-            alt_cc = self._mosaics_inner_loop(
-                particle_images_dft=particle_images_dft,
-                rot_mat=rot_mat,
-                projective_filters=projective_filters,
-                default_volume=default_template,
-                atom_indices=atom_indices,
-                gpu_id=gpu_id,
+            if len(atom_indices) == 0:
+                warnings.warn(
+                    "No atoms to remove for this iteration. Skipping calculation.",
+                    RuntimeWarning,
+                )
+                alt_cc = default_cc
+                alt_mass = default_mass
+                mass_adj = 1.0
+
+            else:
+                alt_cc = self._mosaics_inner_loop(
+                    particle_images_dft=particle_images_dft,
+                    rot_mat=rot_mat,
+                    projective_filters=projective_filters,
+                    default_volume=default_template,
+                    atom_indices=atom_indices,
+                    device=device,
+                )
+            alt_cc = alt_cc.cpu().numpy().tolist()
+
+            alt_mass = self.template_iterator.get_alternate_template_mass(atom_indices)
+            mass_adj = (default_mass - alt_mass) / default_mass
+
+            res = AlternateTemplateResult(
+                cross_correlation=alt_cc,
+                mass_adjustment_factor=mass_adj,
+                chain_residue_pairs=chain_reside_pairs,
+                removed_atom_indices=atom_indices.cpu().numpy().tolist(),
             )
-            alternate_ccs.append(alt_cc)
-
-        # Post-hoc calculate the relative removed from each alternate model
-        # for the mass adjustment factor
-        default_mass = self.template_iterator.get_default_template_mass()
-        alternate_masses = self.template_iterator.get_alternate_template_mass()
-        alternate_masses = np.array(alternate_masses)
-
-        mass_adjustment_factors = (default_mass - alternate_masses) / default_mass  # type: ignore
-
-        # Stack the alternate cross-correlation values into a single tensor
-        alternate_ccs = torch.stack(alternate_ccs, dim=0)
-
-        # Create the metadata for the alternate chain residues
-        alternate_chain_residue_metadata = {
-            f"alt_cc_{i}": chain_residue_pairs
-            for i, chain_residue_pairs in enumerate(alternate_chain_residue_pairs)
-        }
+            alternate_template_results.append(res)
 
         return MosaicsResult(
-            default_cross_correlation=default_cc.cpu().numpy(),
-            alternate_cross_correlations=alternate_ccs.cpu().numpy(),  # type: ignore
-            mass_adjustment_factors=mass_adjustment_factors,
-            template_iterator_type=self.template_iterator.type,
-            alternate_chain_residue_metadata=alternate_chain_residue_metadata,
+            num_particles=self.particle_stack.num_particles,
+            template_iterator_type=type(self.template_iterator).__name__,
             sim_removed_atoms_only=self.sim_removed_atoms_only,
+            default_cross_correlation=default_cc.cpu().numpy().tolist(),
+            alternate_template_results=alternate_template_results,
         )

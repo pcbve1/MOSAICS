@@ -30,8 +30,10 @@ class AlternateTemplateResult(BaseModel):
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     cross_correlation: list[float]
+    alternate_structure_mass: float
     mass_adjustment_factor: float
-    chain_residue_pairs: Optional[tuple[list[str], list[int]]]
+    chain_ids: list[Optional[str]]
+    residue_ids: list[Optional[int]]
     removed_atom_indices: list[int]
 
 

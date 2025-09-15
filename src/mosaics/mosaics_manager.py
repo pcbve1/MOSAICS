@@ -257,7 +257,7 @@ class MosaicsManager(BaseModel):
         )
         default_cc = torch.max(default_cc.view(default_cc.shape[0], -1), dim=-1).values
 
-        default_mass = self.template_iterator.get_default_template_mass()
+        default_mass = self.template_iterator.get_template_mass(None)
 
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
@@ -269,12 +269,12 @@ class MosaicsManager(BaseModel):
         # indices of the atoms that should NOT be removed. This is opposite of the
         # the 'sim_removed_atoms_only' flag.
         inverted = not self.sim_removed_atoms_only
-        chain_residue_iterator = self.template_iterator.chain_residue_iter()
-        atom_idx_iterator = self.template_iterator.atom_idx_iter(inverted=inverted)
+        alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
+        num_iters = self.template_iterator.num_alternate_structures
 
         alternate_template_results = []
-        for atom_indices, chain_reside_pairs in tqdm.tqdm(
-            zip(atom_idx_iterator, chain_residue_iterator),
+        for chains, residues, atom_indices in tqdm.tqdm(
+            alt_template_iter,
             total=num_iters,
             desc="Iterating over alternate models",
         ):
@@ -298,13 +298,16 @@ class MosaicsManager(BaseModel):
                 )
             alt_cc = alt_cc.cpu().numpy().tolist()
 
-            alt_mass = self.template_iterator.get_alternate_template_mass(atom_indices)
+            alt_mass = self.template_iterator.get_template_mass(atom_indices)
+            alt_mass = default_mass - alt_mass if self.sim_removed_atoms_only else alt_mass
             mass_adj = (default_mass - alt_mass) / default_mass
 
             res = AlternateTemplateResult(
                 cross_correlation=alt_cc,
+                alternate_structure_mass=alt_mass,
                 mass_adjustment_factor=mass_adj,
-                chain_residue_pairs=chain_reside_pairs,
+                chain_ids=chains,
+                residue_ids=residues,
                 removed_atom_indices=atom_indices.cpu().numpy().tolist(),
             )
             alternate_template_results.append(res)

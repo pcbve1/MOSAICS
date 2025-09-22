@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from teamtomo_basemodel import ExcludedDataFrame
+from ttsim3d.scattering_potential import get_a_param
 
 #########################################################
 ### Data for residue/atom identification in PDB files ###
@@ -227,7 +229,7 @@ class BaseTemplateIterator(BaseModel):
     dna_atoms : list[str], optional
         List of atom type labels (in the PDB file) to remove from DNA residues.
         Default is ['C1', 'C2', 'C3', 'C4', 'O4'].
-    structure_df : pd.DataFrame
+    structure_df : ExcludedDataFrame
         Underlying Pandas DataFrame for the PDB model.
 
     Methods
@@ -253,7 +255,7 @@ class BaseTemplateIterator(BaseModel):
     rna_atoms: list[str] = DEFAULT_RNA_ATOMS
     dna_atoms: list[str] = DEFAULT_DNA_ATOMS
 
-    structure_df: pd.DataFrame  # NOTE: Comes from Simulator object
+    structure_df: ExcludedDataFrame  # NOTE: Comes from Simulator object
 
     @field_validator("structure_df", mode="after")  # type: ignore
     def _validate_structure_df(cls, v):
@@ -341,7 +343,9 @@ class BaseTemplateIterator(BaseModel):
 
         return subset_df
 
-    def get_template_mass(self, atom_idxs: torch.Tensor | np.ndarray = None) -> float:
+    def get_template_scattering_potential(
+        self, atom_idxs: torch.Tensor | np.ndarray = None
+    ) -> float:
         """Get the mass (in amu) of a template structure given atom indexes."""
         if atom_idxs is None:
             atom_idxs = np.arange(len(self.structure_df))
@@ -349,16 +353,15 @@ class BaseTemplateIterator(BaseModel):
         if isinstance(atom_idxs, torch.Tensor):
             atom_idxs = atom_idxs.numpy()
 
-        total_mass = 0
+        total_scattering_potential = 0
         atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
         for atom, count in atom_counts.items():
-            if atom not in MASS_DICT:
-                raise ValueError(f"Unknown atom type: {atom}")
+            atom = atom.upper()
+            potentials = get_a_param(atom)
+            potentials = torch.sum(potentials).item()
+            total_scattering_potential += potentials * count
 
-            mass = MASS_DICT[atom]
-            total_mass += mass * count
-
-        return total_mass
+        return total_scattering_potential
 
 
 class RandomAtomTemplateIterator(BaseTemplateIterator):

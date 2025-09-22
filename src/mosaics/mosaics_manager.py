@@ -116,7 +116,7 @@ class MosaicsManager(BaseModel):
         )
 
         # Subtract the alternate_volume from the default_volume if
-        # self.sim_only_removed_atoms is set.
+        # self.sim_removed_atoms_only is set.
         # This is because when inverted, then only the atoms which should be
         # removed get simulated rather than the atoms which should be kept.
         if self.sim_removed_atoms_only:
@@ -300,7 +300,7 @@ class MosaicsManager(BaseModel):
             batch_size=batch_size,
         )
 
-        default_mass = self.template_iterator.get_template_mass(None)
+        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)
 
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
@@ -328,8 +328,7 @@ class MosaicsManager(BaseModel):
                     stacklevel=2,
                 )
                 alt_cc = default_cc
-                alt_mass = default_mass
-                mass_adj = 1.0
+                alt_sc_pot = default_sc_pot
 
             else:
                 alt_cc = self._mosaics_inner_loop(
@@ -340,28 +339,25 @@ class MosaicsManager(BaseModel):
                     atom_indices=atom_indices,
                     device=device,
                 )
-            alt_cc = alt_cc.cpu().numpy().tolist()
-
-            alt_mass = self.template_iterator.get_template_mass(atom_indices)
-            alt_mass = (
-                default_mass - alt_mass if self.sim_removed_atoms_only else alt_mass
+            alt_cc = alt_cc.cpu().numpy()
+            alt_sc_pot = self.template_iterator.get_template_scattering_potential(
+                atom_indices
             )
-            mass_adj = (default_mass - alt_mass) / default_mass
 
             res = AlternateTemplateResult(
                 cross_correlation=alt_cc,
-                alternate_structure_mass=alt_mass,
-                mass_adjustment_factor=mass_adj,
                 chain_ids=chains,
                 residue_ids=residues,
-                removed_atom_indices=atom_indices.cpu().numpy().tolist(),
+                removed_atom_indices=atom_indices.cpu().numpy(),
+                sim_removed_atoms_only=self.sim_removed_atoms_only,
+                scattering_potential_full_length=default_sc_pot,
+                scattering_potential_alternate=alt_sc_pot,
             )
             alternate_template_results.append(res)
 
         return MosaicsResult(
-            num_particles=self.particle_stack.num_particles,
-            template_iterator_type=type(self.template_iterator).__name__,
+            default_cross_correlation=default_cc.cpu().numpy(),
+            template_iterator_config=self.template_iterator.model_dump(),
             sim_removed_atoms_only=self.sim_removed_atoms_only,
-            default_cross_correlation=default_cc.cpu().numpy().tolist(),
             alternate_template_results=alternate_template_results,
         )

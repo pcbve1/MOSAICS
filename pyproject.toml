@@ -32,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
 # add your package dependencies here
@@ -46,6 +47,7 @@ dependencies = [
     "roma",
     "tqdm",
     "ttsim3d",
+    "teamtomo-basemodel",
     "Leopard-EM==v1.0",
 ]
 

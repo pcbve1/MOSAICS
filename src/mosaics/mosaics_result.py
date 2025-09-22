@@ -1,11 +1,29 @@
 """Class for storing the results from a MOSAICS run."""
 
-import json
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+
+
+def nd_array_before_validator(v: Any) -> np.ndarray:
+    """Validator to ensure the value is a numpy array."""
+    if isinstance(v, np.ndarray):
+        return v
+    return np.array(v)
+
+
+def nd_array_serializer(v: np.ndarray) -> list:
+    """Serializer to convert numpy array to list."""
+    return v.tolist()  # type: ignore
+
+
+NDArray = Annotated[
+    np.ndarray,
+    BeforeValidator(nd_array_before_validator),
+    PlainSerializer(nd_array_serializer, return_type=list),
+]
 
 
 class AlternateTemplateResult(BaseModel):
@@ -16,25 +34,55 @@ class AlternateTemplateResult(BaseModel):
     cross_correlation : np.ndarray
         The cross-correlation values for the alternate (truncated) model for each
         particle in the dataset.
-    mass_adjustment_factor : float
-        The mass adjustment factor, which is calculated as the ratio of the mass of the
-        truncated model to the mass of the default model.
-    chain_residue_pairs : list[tuple[str, int]]
-        The metadata for the chain residues that were removed to create the alternate
-        model. Each entry in the list is a tuple containing the (chain, residue_id)
-        pair that was removed
-    removed_atom_indices : np.ndarray
-        The indices of the atoms that were removed to create the alternate model.
+    chain_ids : list[Optional[str]]
+        The chain IDs for each residue in the model. This list is index aligned with
+        'residue_ids'.
+    residue_ids : list[Optional[int]]
+        The residue IDs for each residue in the model. This list is index aligned with
+        'chain_ids'.
+    removed_atom_indices : list[int]
+        The atom indices that were removed from the full model to create the alternate
+        (truncated) model.
+    sim_removed_atoms_only : bool
+        Whether only the removed residues were used for the cross-correlation
+        calculation. Default is False which means the entire model (minus the removed
+        atoms from the corresponding residues) were used in the calculation. If True,
+        only the removed atoms were used in the calculation.
+    scattering_potential_full_length : float
+        The total scattering potential of the full-length model.
+    scattering_potential_alternate : float
+        The total scattering potential of the alternate (truncated) model. If
+        'sim_removed_atoms_only' is True, this will be the scattering potential
+        of the removed atoms only. Otherwise, it will be the scattering potential of the
+        full model minus the removed atoms.
+
+    Methods
+    -------
+    expected_correlation_decrease() -> float
+        Returns the expected relative decrease in cross-correlation due to the change
+        in scattering potential.
     """
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    cross_correlation: list[float]
-    alternate_structure_mass: float
-    mass_adjustment_factor: float
-    chain_ids: list[Optional[str]]
-    residue_ids: list[Optional[int]]
-    removed_atom_indices: list[int]
+    cross_correlation: NDArray
+    chain_ids: list[Optional[str]]  # index aligned with residue_ids
+    residue_ids: list[Optional[int]]  # index aligned with chain_ids
+    removed_atom_indices: NDArray
+    sim_removed_atoms_only: bool
+    scattering_potential_full_length: float
+    scattering_potential_alternate: float
+
+    def expected_correlation_decrease(self) -> float:
+        """Relative decrease in cross-corr due to change in scattering potential."""
+        if self.sim_removed_atoms_only:
+            delta = self.scattering_potential_alternate
+        else:
+            delta = (
+                self.scattering_potential_full_length
+                - self.scattering_potential_alternate
+            )
+        return delta / self.scattering_potential_full_length
 
 
 class MosaicsResult(BaseModel):
@@ -42,28 +90,33 @@ class MosaicsResult(BaseModel):
 
     Attributes
     ----------
-    num_particles : int
-        The number of particles in the dataset.
-    template_iterator_type : str
-        The type of template iterator used for the alternate models.
+    default_cross_correlation : np.ndarray
+        The default (non-truncated model) cross-correlation values.
+    template_iterator_config : dict[str, Any]
+        The configuration of the template iterator used for the alternate models.
     sim_removed_atoms_only : bool
         Whether only the removed residues were used for the cross-correlation
-        calculation. Default is False which means the entire model (minus the removed
-        atoms from the corresponding residues) were used in the calculation. If True,
-        only the removed atoms were used in the calculation.
-    default_cross_correlation : list[float]
-        The default (non-truncated model) cross-correlation values.
+        calculation.
     alternate_template_results : list[AlternateTemplateResult]
         The results for each of the alternate template runs.
     """
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    num_particles: int
-    template_iterator_type: str
-    sim_removed_atoms_only: bool = False
-    default_cross_correlation: list[float]
+    default_cross_correlation: NDArray
+    template_iterator_config: dict[str, Any]
+    sim_removed_atoms_only: bool
     alternate_template_results: list[AlternateTemplateResult]
+
+    @property
+    def num_particles(self) -> int:
+        """Returns the number of particles in the dataset."""
+        return len(self.default_cross_correlation)
+
+    @property
+    def num_alternate_models(self) -> int:
+        """Returns the number of alternate (truncated) models used."""
+        return len(self.alternate_template_results)
 
     def to_df(self, extra_columns: Optional[dict[str, Any]] = None) -> pd.DataFrame:
         """Containerizes the experiment results into a Pandas DataFrame.
@@ -93,7 +146,6 @@ class MosaicsResult(BaseModel):
 
         # Figure out the dimensions of the data
         num_parts = self.num_particles
-        num_alts = len(self.alternate_template_results)
 
         # Create the base dataframe with particle IDs and default cross-correlations
         particle_id = [f"part_{i}" for i in range(num_parts)]
@@ -107,6 +159,14 @@ class MosaicsResult(BaseModel):
             df[f"alt_cc_{i}"] = alt_result.cross_correlation
 
         return df
+
+    def expected_correlation_decreases(self) -> np.ndarray:
+        """Returns the expected corr decrease for each alternate model."""
+        res = []
+        for alt_result in self.alternate_template_results:
+            res.append(alt_result.expected_correlation_decrease())
+
+        return np.array(res)
 
     def as_ndarrays(self) -> tuple[np.ndarray, np.ndarray]:
         """Returns the default and alternate cross-correlation values as numpy arrays.
@@ -126,7 +186,7 @@ class MosaicsResult(BaseModel):
             ]
         ).T
         return default_cc, alt_cc
-    
+
     def mosaics_scores(self) -> np.ndarray:
         """Calculates the MOSAICS scores for each particle and alternate model.
 
@@ -139,12 +199,8 @@ class MosaicsResult(BaseModel):
             (num_particles, num_alternate_models).
         """
         default_cc, alt_cc = self.as_ndarrays()
-        mass_adjustment_factors = np.array(
-            [
-                alt_result.mass_adjustment_factor
-                for alt_result in self.alternate_template_results
-            ]
-        )
+        adjustment_factors = self.expected_correlation_decreases()
 
-        scores = (alt_cc / mass_adjustment_factors) / default_cc[:, None]
+        scores = (alt_cc / adjustment_factors) / default_cc[:, None]
+
         return scores

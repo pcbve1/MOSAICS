@@ -137,9 +137,14 @@ def cross_correlate_particle_stack(
         # Inverse Fourier transform and normalize the projection
         projections = torch.fft.irfftn(fourier_slice, dim=(-2, -1))
         projections = torch.fft.ifftshift(projections, dim=(-2, -1))
-        projections = normalize_template_projection(
-            projections, (template_h, template_w), (image_h, image_w)
-        )
+
+        # NOTE: Turning off template normalization for MOSAICS
+        # projections = normalize_template_projection(
+        #     projections, (template_h, template_w), (image_h, image_w)
+        # )
+
+        # Scale by the number of pixels
+        projections *= (template_h * template_w) ** 0.5
 
         # Padded forward FFT and cross-correlate
         projections_dft = torch.fft.rfftn(

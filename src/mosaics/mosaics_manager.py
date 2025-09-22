@@ -3,6 +3,7 @@
 from typing import Literal, Union
 import warnings
 
+import glob
 import mmdf
 import numpy as np
 import roma
@@ -140,7 +141,7 @@ class MosaicsManager(BaseModel):
         return alt_cc
 
     def _setup_mosaics_variables(
-        self, device: torch.device
+        self, device: torch.device, use_cache_dir: Union[None, str] = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up necessary variables for running MOSAICS.
 
@@ -148,6 +149,11 @@ class MosaicsManager(BaseModel):
         ----------
         device : torch.device
             The device to use for the computation. Can only be a single device.
+        use_cache_dir : Union[None, str], optional
+            If a string is provided, then the path is assumed to contain a .npz file
+            named 'mosaics_cache_{timestamp}.npz' which contains pre-computed mosaics
+            variables. Useful when many experiments are being run in sequence. Default
+            is None, which means no cache file is used.
 
         Returns
         -------
@@ -162,6 +168,38 @@ class MosaicsManager(BaseModel):
         default_template_dft : torch.Tensor
             The DFT of the default (full-length) volume.
         """
+        if use_cache_dir is not None:
+            cache_files = glob.glob(f"{use_cache_dir}/mosaics_cache_*.npz")
+            if len(cache_files) == 0:
+                raise FileNotFoundError(
+                    f"No MOSAICS cache files found in directory: {use_cache_dir}."
+                )
+            elif len(cache_files) > 1:
+                raise ValueError(
+                    f"Multiple MOSAICS cache files found in directory: "
+                    f"{use_cache_dir}. Only one cache file should be present."
+                )
+
+            cache_file = cache_files[0]
+            data = np.load(cache_file)
+
+            rot_mat = torch.tensor(data["rot_mat"], device=device)
+            projective_filters = torch.tensor(data["projective_filters"], device=device)
+            particle_images_dft = torch.tensor(
+                data["particle_images_dft"], device=device
+            )
+            default_template = torch.tensor(data["default_template"], device=device)
+            default_template_dft = torch.tensor(
+                data["default_template_dft"], device=device
+            )
+
+            return (
+                rot_mat,
+                projective_filters,
+                particle_images_dft,
+                default_template,
+                default_template_dft,
+            )
 
         # Simulate the default (full-length) template volume
         default_template = self.simulator.run(device=str(device))
@@ -212,7 +250,10 @@ class MosaicsManager(BaseModel):
         )
 
     def run_mosaics(
-        self, gpu_id: Union[Literal["cpu"], int], batch_size: int = 2048
+        self,
+        gpu_id: Union[Literal["cpu"], int],
+        batch_size: int = 2048,
+        use_cache_dir: Union[None, str] = None,
     ) -> MosaicsResult:
         """Run the MOSAICS program.
 
@@ -225,6 +266,12 @@ class MosaicsManager(BaseModel):
         batch_size : int, optional
             The batch size -- number of particle images to process at once -- to use
             for the cross-correlation calculations. The default is 2048.
+        use_cache_dir : Union[None, str], optional
+            If a string is provided, then the path is assumed to contain a .npz file
+            named 'mosaics_cache_{timestamp}.npz' which contains pre-computed mosaics
+            variables from the function _setup_mosaics_variables(). Useful when many
+            experiments are being run in sequence. Default is None, which means no cache
+            file is used.
         """
         if gpu_id == "cpu":
             device = torch.device("cpu")
@@ -241,7 +288,7 @@ class MosaicsManager(BaseModel):
             particle_images_dft,
             default_template,
             default_template_dft,
-        ) = self._setup_mosaics_variables(device=device)
+        ) = self._setup_mosaics_variables(device=device, use_cache_dir=use_cache_dir)
 
         #####################################################
         ### 1. Calculate default (full length) cross corr ###
@@ -299,7 +346,9 @@ class MosaicsManager(BaseModel):
             alt_cc = alt_cc.cpu().numpy().tolist()
 
             alt_mass = self.template_iterator.get_template_mass(atom_indices)
-            alt_mass = default_mass - alt_mass if self.sim_removed_atoms_only else alt_mass
+            alt_mass = (
+                default_mass - alt_mass if self.sim_removed_atoms_only else alt_mass
+            )
             mass_adj = (default_mass - alt_mass) / default_mass
 
             res = AlternateTemplateResult(

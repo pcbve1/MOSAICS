@@ -1,9 +1,9 @@
 """Manager class for running MOSAICS."""
 
-from typing import Literal, Union
-import warnings
-
 import glob
+import warnings
+from typing import Literal, Union
+
 import mmdf
 import numpy as np
 import roma
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from ttsim3d.models import Simulator
 
 from .cross_correlation_core import cross_correlate_particle_stack
-from .mosaics_result import MosaicsResult, AlternateTemplateResult
+from .mosaics_result import AlternateTemplateResult, MosaicsResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
 
 
@@ -83,7 +83,7 @@ class MosaicsManager(BaseModel):
 
     def _mosaics_inner_loop(
         self,
-        particle_images_dft: torch.Tensor,
+        particle_images: torch.Tensor,
         rot_mat: torch.Tensor,
         projective_filters: torch.Tensor,
         default_volume: torch.Tensor,
@@ -95,8 +95,8 @@ class MosaicsManager(BaseModel):
 
         Parameters
         ----------
-        particle_images_dft : torch.Tensor
-            The DFT of the particle images. Pre-processed and normalized.
+        particle_images : torch.Tensor
+            Pre-processed and normalized particle images *in real space*.
         rot_mat : torch.Tensor
             The rotation matrices for the orientations of each particle.
         projective_filters : torch.Tensor
@@ -129,14 +129,12 @@ class MosaicsManager(BaseModel):
         # Recalculate the cross-correlation with the alternate model
         # and take the maximum value over space
         alt_cc = cross_correlate_particle_stack(
-            particle_stack_dft=particle_images_dft,
+            particle_stack_images=particle_images,
             template_dft=alternate_volume_dft,
             rotation_matrices=rot_mat,
             projective_filters=projective_filters,
-            mode="valid",
             batch_size=batch_size,
         )
-        alt_cc = torch.max(alt_cc.view(particle_images_dft.shape[0], -1), dim=-1).values
 
         return alt_cc
 
@@ -161,8 +159,8 @@ class MosaicsManager(BaseModel):
             The rotation matrices for the orientations of each particle.
         projective_filters : torch.Tensor
             The projection filters for each particle image.
-        particle_images_dft : torch.Tensor
-            The DFT of the particle images. Pre-processed and normalized.
+        particle_images : torch.Tensor
+            Pre-filtered images of particles in real-space.
         default_template : torch.Tensor
             The default (full-length) volume to compare against.
         default_template_dft : torch.Tensor
@@ -185,9 +183,7 @@ class MosaicsManager(BaseModel):
 
             rot_mat = torch.tensor(data["rot_mat"], device=device)
             projective_filters = torch.tensor(data["projective_filters"], device=device)
-            particle_images_dft = torch.tensor(
-                data["particle_images_dft"], device=device
-            )
+            particle_images = torch.tensor(data["particle_images"], device=device)
             default_template = torch.tensor(data["default_template"], device=device)
             default_template_dft = torch.tensor(
                 data["default_template_dft"], device=device
@@ -196,7 +192,7 @@ class MosaicsManager(BaseModel):
             return (
                 rot_mat,
                 projective_filters,
-                particle_images_dft,
+                particle_images,
                 default_template,
                 default_template_dft,
             )
@@ -211,6 +207,8 @@ class MosaicsManager(BaseModel):
                 self.particle_stack, self.preprocessing_filters, default_template
             )
         )
+        particle_images = torch.fft.irfftn(particle_images_dft, dim=(-2, -1))
+        particle_images *= torch.numel(particle_images[0]) ** 0.5  # norm again
 
         # Calculate the per-particle CTF array and combine it with projective filters
         defocus_u, defocus_v = self.particle_stack.get_absolute_defocus()
@@ -238,13 +236,13 @@ class MosaicsManager(BaseModel):
         # Pass tensors to device
         rot_mat = rot_mat.to(device)
         projective_filters = projective_filters.to(device)
-        particle_images_dft = particle_images_dft.to(device)
+        particle_images = particle_images.to(device)
         default_template_dft = default_template_dft.to(device)
 
         return (
             rot_mat,
             projective_filters,
-            particle_images_dft,
+            particle_images,
             default_template,
             default_template_dft,
         )
@@ -285,7 +283,7 @@ class MosaicsManager(BaseModel):
         (
             rot_mat,
             projective_filters,
-            particle_images_dft,
+            particle_images,
             default_template,
             default_template_dft,
         ) = self._setup_mosaics_variables(device=device, use_cache_dir=use_cache_dir)
@@ -295,14 +293,12 @@ class MosaicsManager(BaseModel):
         #####################################################
 
         default_cc = cross_correlate_particle_stack(
-            particle_stack_dft=particle_images_dft,
+            particle_stack_images=particle_images,
             template_dft=default_template_dft,
             rotation_matrices=rot_mat,
             projective_filters=projective_filters,
-            mode="valid",
             batch_size=batch_size,
         )
-        default_cc = torch.max(default_cc.view(default_cc.shape[0], -1), dim=-1).values
 
         default_mass = self.template_iterator.get_template_mass(None)
 
@@ -329,6 +325,7 @@ class MosaicsManager(BaseModel):
                 warnings.warn(
                     "No atoms to remove for this iteration. Skipping calculation.",
                     RuntimeWarning,
+                    stacklevel=2,
                 )
                 alt_cc = default_cc
                 alt_mass = default_mass
@@ -336,7 +333,7 @@ class MosaicsManager(BaseModel):
 
             else:
                 alt_cc = self._mosaics_inner_loop(
-                    particle_images_dft=particle_images_dft,
+                    particle_images=particle_images,
                     rot_mat=rot_mat,
                     projective_filters=projective_filters,
                     default_volume=default_template,

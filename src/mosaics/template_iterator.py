@@ -1,7 +1,7 @@
 """Module for different ways of generating alternate templates for comparison."""
 
 from abc import abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from typing import Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -246,7 +246,7 @@ class BaseTemplateIterator(BaseModel):
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    type: ClassVar[Literal["random", "chain", "residue"]]
+    type: ClassVar[Literal["random", "random_residue", "chain", "residue"]]
 
     residue_types: list[Literal["amino_acid", "rna", "dna"]]
     amino_acid_atoms: list[str] = DEFAULT_AMINO_ACID_ATOMS
@@ -290,7 +290,7 @@ class BaseTemplateIterator(BaseModel):
     @abstractmethod
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, reside, and atom indices removed for alternates.
 
         Parameters
@@ -311,8 +311,7 @@ class BaseTemplateIterator(BaseModel):
 
     def subset_df_on_residues(self) -> pd.DataFrame:
         """Returns a df subset selecting only valid residues to consider."""
-        keep_residues = []
-        keep_atoms = []
+        keep_residues: list[str] = []
         if "amino_acid" in self.residue_types:
             keep_residues.extend(AMINO_ACID_RESIDUES)
         if "rna" in self.residue_types:
@@ -329,7 +328,7 @@ class BaseTemplateIterator(BaseModel):
         """Returns a df subset selecting only valid residues and atoms to consider."""
         subset_df = self.subset_df_on_residues()
 
-        keep_atoms = []
+        keep_atoms: list[str] = []
         if "amino_acid" in self.residue_types:
             keep_atoms.extend(self.amino_acid_atoms)
         if "rna" in self.residue_types:
@@ -387,7 +386,7 @@ class RandomAtomTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Randomly removes atoms (of specified types) from the structure.
 
         If coherent_removal is True, then a random starting index is chosen and a chunk
@@ -447,7 +446,7 @@ class ChainTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, residue, and atom indices removed for alternates.
 
         Parameters
@@ -578,7 +577,7 @@ class ResidueTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, residue, and atom indices removed for alternates.
 
         Parameters
@@ -645,7 +644,7 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Randomly removes residues (of specified types) from the structure.
 
         If coherent_removal is True, then a random starting index is chosen and a chunk
@@ -671,7 +670,7 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
         # Get the unique chain, residue pairs in order
         chain_res_pairs = subset_df[["chain", "residue_id"]].drop_duplicates()
-        chain_res_pairs = chain_res_pairs.to_records(index=False).tolist()  # type: ignore
+        chain_res_pairs = chain_res_pairs.to_records(index=False).tolist()
         chains = np.array([chain for chain, _ in chain_res_pairs])
         residues = np.array([residue for _, residue in chain_res_pairs])
 

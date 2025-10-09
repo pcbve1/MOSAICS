@@ -1,9 +1,8 @@
 """Manager class for running MOSAICS."""
 
-from typing import Literal, Union
 import warnings
+from typing import Literal, Union
 
-import glob
 import mmdf
 import numpy as np
 import roma
@@ -21,7 +20,7 @@ from pydantic import BaseModel
 from ttsim3d.models import Simulator
 
 from .cross_correlation_core import cross_correlate_particle_stack
-from .mosaics_result import MosaicsResult, AlternateTemplateResult
+from .mosaics_result import AlternateTemplateResult, MosaicsResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
 
 
@@ -83,7 +82,7 @@ class MosaicsManager(BaseModel):
 
     def _mosaics_inner_loop(
         self,
-        particle_images_dft: torch.Tensor,
+        particle_images: torch.Tensor,
         rot_mat: torch.Tensor,
         projective_filters: torch.Tensor,
         default_volume: torch.Tensor,
@@ -95,8 +94,8 @@ class MosaicsManager(BaseModel):
 
         Parameters
         ----------
-        particle_images_dft : torch.Tensor
-            The DFT of the particle images. Pre-processed and normalized.
+        particle_images : torch.Tensor
+            Pre-processed and normalized particle images *in real space*.
         rot_mat : torch.Tensor
             The rotation matrices for the orientations of each particle.
         projective_filters : torch.Tensor
@@ -116,7 +115,7 @@ class MosaicsManager(BaseModel):
         )
 
         # Subtract the alternate_volume from the default_volume if
-        # self.sim_only_removed_atoms is set.
+        # self.sim_removed_atoms_only is set.
         # This is because when inverted, then only the atoms which should be
         # removed get simulated rather than the atoms which should be kept.
         if self.sim_removed_atoms_only:
@@ -129,19 +128,67 @@ class MosaicsManager(BaseModel):
         # Recalculate the cross-correlation with the alternate model
         # and take the maximum value over space
         alt_cc = cross_correlate_particle_stack(
-            particle_stack_dft=particle_images_dft,
+            particle_stack_images=particle_images,
             template_dft=alternate_volume_dft,
             rotation_matrices=rot_mat,
             projective_filters=projective_filters,
-            mode="valid",
             batch_size=batch_size,
         )
-        alt_cc = torch.max(alt_cc.view(particle_images_dft.shape[0], -1), dim=-1).values
 
         return alt_cc
 
+    def _create_data_cache(self, device: torch.device, cache_file: str) -> None:
+        """Sets up the MOSAICS variables and saves them to a cached .npz file."""
+        (
+            rot_mat,
+            projective_filters,
+            particle_images,
+            default_template,
+            default_template_dft,
+        ) = self._setup_mosaics_variables(device=device)
+
+        # Pass all tensors onto the CPU and then to numpy arrays
+        rot_mat = rot_mat.cpu().numpy()
+        projective_filters = projective_filters.cpu().numpy()
+        particle_images = particle_images.cpu().numpy()
+        default_template = default_template.cpu().numpy()
+        default_template_dft = default_template_dft.cpu().numpy()
+
+        np.savez(
+            cache_file,
+            rot_mat=rot_mat,
+            projective_filters=projective_filters,
+            particle_images=particle_images,
+            default_template=default_template,
+            default_template_dft=default_template_dft,
+        )
+
+    def _load_mosaics_variables_from_cache(
+        self, device: torch.device, cache_file: str
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Loads the MOSAICS variables from a cached .npz file."""
+        cache_data = np.load(cache_file)
+
+        rot_mat = torch.from_numpy(cache_data["rot_mat"]).to(device)
+        projective_filters = torch.from_numpy(cache_data["projective_filters"]).to(
+            device
+        )
+        particle_images = torch.from_numpy(cache_data["particle_images"]).to(device)
+        default_template = torch.from_numpy(cache_data["default_template"]).to(device)
+        default_template_dft = torch.from_numpy(cache_data["default_template_dft"]).to(
+            device
+        )
+
+        return (
+            rot_mat,
+            projective_filters,
+            particle_images,
+            default_template,
+            default_template_dft,
+        )
+
     def _setup_mosaics_variables(
-        self, device: torch.device, use_cache_dir: Union[None, str] = None
+        self, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Set up necessary variables for running MOSAICS.
 
@@ -149,11 +196,6 @@ class MosaicsManager(BaseModel):
         ----------
         device : torch.device
             The device to use for the computation. Can only be a single device.
-        use_cache_dir : Union[None, str], optional
-            If a string is provided, then the path is assumed to contain a .npz file
-            named 'mosaics_cache_{timestamp}.npz' which contains pre-computed mosaics
-            variables. Useful when many experiments are being run in sequence. Default
-            is None, which means no cache file is used.
 
         Returns
         -------
@@ -161,46 +203,13 @@ class MosaicsManager(BaseModel):
             The rotation matrices for the orientations of each particle.
         projective_filters : torch.Tensor
             The projection filters for each particle image.
-        particle_images_dft : torch.Tensor
-            The DFT of the particle images. Pre-processed and normalized.
+        particle_images : torch.Tensor
+            Pre-filtered images of particles in real-space.
         default_template : torch.Tensor
             The default (full-length) volume to compare against.
         default_template_dft : torch.Tensor
             The DFT of the default (full-length) volume.
         """
-        if use_cache_dir is not None:
-            cache_files = glob.glob(f"{use_cache_dir}/mosaics_cache_*.npz")
-            if len(cache_files) == 0:
-                raise FileNotFoundError(
-                    f"No MOSAICS cache files found in directory: {use_cache_dir}."
-                )
-            elif len(cache_files) > 1:
-                raise ValueError(
-                    f"Multiple MOSAICS cache files found in directory: "
-                    f"{use_cache_dir}. Only one cache file should be present."
-                )
-
-            cache_file = cache_files[0]
-            data = np.load(cache_file)
-
-            rot_mat = torch.tensor(data["rot_mat"], device=device)
-            projective_filters = torch.tensor(data["projective_filters"], device=device)
-            particle_images_dft = torch.tensor(
-                data["particle_images_dft"], device=device
-            )
-            default_template = torch.tensor(data["default_template"], device=device)
-            default_template_dft = torch.tensor(
-                data["default_template_dft"], device=device
-            )
-
-            return (
-                rot_mat,
-                projective_filters,
-                particle_images_dft,
-                default_template,
-                default_template_dft,
-            )
-
         # Simulate the default (full-length) template volume
         default_template = self.simulator.run(device=str(device))
 
@@ -211,6 +220,8 @@ class MosaicsManager(BaseModel):
                 self.particle_stack, self.preprocessing_filters, default_template
             )
         )
+        particle_images = torch.fft.irfftn(particle_images_dft, dim=(-2, -1))
+        particle_images *= torch.numel(particle_images[0]) ** 0.5  # norm again
 
         # Calculate the per-particle CTF array and combine it with projective filters
         defocus_u, defocus_v = self.particle_stack.get_absolute_defocus()
@@ -238,13 +249,13 @@ class MosaicsManager(BaseModel):
         # Pass tensors to device
         rot_mat = rot_mat.to(device)
         projective_filters = projective_filters.to(device)
-        particle_images_dft = particle_images_dft.to(device)
+        particle_images = particle_images.to(device)
         default_template_dft = default_template_dft.to(device)
 
         return (
             rot_mat,
             projective_filters,
-            particle_images_dft,
+            particle_images,
             default_template,
             default_template_dft,
         )
@@ -253,7 +264,7 @@ class MosaicsManager(BaseModel):
         self,
         gpu_id: Union[Literal["cpu"], int],
         batch_size: int = 2048,
-        use_cache_dir: Union[None, str] = None,
+        use_cache_file: Union[None, str] = None,
     ) -> MosaicsResult:
         """Run the MOSAICS program.
 
@@ -266,7 +277,7 @@ class MosaicsManager(BaseModel):
         batch_size : int, optional
             The batch size -- number of particle images to process at once -- to use
             for the cross-correlation calculations. The default is 2048.
-        use_cache_dir : Union[None, str], optional
+        use_cache_file : Union[None, str], optional
             If a string is provided, then the path is assumed to contain a .npz file
             named 'mosaics_cache_{timestamp}.npz' which contains pre-computed mosaics
             variables from the function _setup_mosaics_variables(). Useful when many
@@ -282,29 +293,36 @@ class MosaicsManager(BaseModel):
                 f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
             )
 
-        (
-            rot_mat,
-            projective_filters,
-            particle_images_dft,
-            default_template,
-            default_template_dft,
-        ) = self._setup_mosaics_variables(device=device, use_cache_dir=use_cache_dir)
+        if use_cache_file is not None:
+            (
+                rot_mat,
+                projective_filters,
+                particle_images,
+                default_template,
+                default_template_dft,
+            ) = self._load_mosaics_variables_from_cache(device, use_cache_file)
+        else:
+            (
+                rot_mat,
+                projective_filters,
+                particle_images,
+                default_template,
+                default_template_dft,
+            ) = self._setup_mosaics_variables(device=device)
 
         #####################################################
         ### 1. Calculate default (full length) cross corr ###
         #####################################################
 
         default_cc = cross_correlate_particle_stack(
-            particle_stack_dft=particle_images_dft,
+            particle_stack_images=particle_images,
             template_dft=default_template_dft,
             rotation_matrices=rot_mat,
             projective_filters=projective_filters,
-            mode="valid",
             batch_size=batch_size,
         )
-        default_cc = torch.max(default_cc.view(default_cc.shape[0], -1), dim=-1).values
 
-        default_mass = self.template_iterator.get_template_mass(None)
+        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)
 
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
@@ -329,42 +347,39 @@ class MosaicsManager(BaseModel):
                 warnings.warn(
                     "No atoms to remove for this iteration. Skipping calculation.",
                     RuntimeWarning,
+                    stacklevel=2,
                 )
                 alt_cc = default_cc
-                alt_mass = default_mass
-                mass_adj = 1.0
+                alt_sc_pot = default_sc_pot
 
             else:
                 alt_cc = self._mosaics_inner_loop(
-                    particle_images_dft=particle_images_dft,
+                    particle_images=particle_images,
                     rot_mat=rot_mat,
                     projective_filters=projective_filters,
                     default_volume=default_template,
                     atom_indices=atom_indices,
                     device=device,
                 )
-            alt_cc = alt_cc.cpu().numpy().tolist()
-
-            alt_mass = self.template_iterator.get_template_mass(atom_indices)
-            alt_mass = (
-                default_mass - alt_mass if self.sim_removed_atoms_only else alt_mass
+            alt_cc = alt_cc.cpu().numpy()
+            alt_sc_pot = self.template_iterator.get_template_scattering_potential(
+                atom_indices
             )
-            mass_adj = (default_mass - alt_mass) / default_mass
 
             res = AlternateTemplateResult(
                 cross_correlation=alt_cc,
-                alternate_structure_mass=alt_mass,
-                mass_adjustment_factor=mass_adj,
                 chain_ids=chains,
                 residue_ids=residues,
-                removed_atom_indices=atom_indices.cpu().numpy().tolist(),
+                removed_atom_indices=atom_indices.cpu().numpy(),
+                sim_removed_atoms_only=self.sim_removed_atoms_only,
+                scattering_potential_full_length=default_sc_pot,
+                scattering_potential_alternate=alt_sc_pot,
             )
             alternate_template_results.append(res)
 
         return MosaicsResult(
-            num_particles=self.particle_stack.num_particles,
-            template_iterator_type=type(self.template_iterator).__name__,
+            default_cross_correlation=default_cc.cpu().numpy(),
+            template_iterator_config=self.template_iterator.model_dump(),
             sim_removed_atoms_only=self.sim_removed_atoms_only,
-            default_cross_correlation=default_cc.cpu().numpy().tolist(),
             alternate_template_results=alternate_template_results,
         )

@@ -1,13 +1,15 @@
 """Module for different ways of generating alternate templates for comparison."""
 
 from abc import abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from typing import Annotated, Any, ClassVar, Literal
 
 import numpy as np
 import pandas as pd
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from teamtomo_basemodel import ExcludedDataFrame
+from ttsim3d.scattering_potential import get_a_param
 
 #########################################################
 ### Data for residue/atom identification in PDB files ###
@@ -227,7 +229,7 @@ class BaseTemplateIterator(BaseModel):
     dna_atoms : list[str], optional
         List of atom type labels (in the PDB file) to remove from DNA residues.
         Default is ['C1', 'C2', 'C3', 'C4', 'O4'].
-    structure_df : pd.DataFrame
+    structure_df : ExcludedDataFrame
         Underlying Pandas DataFrame for the PDB model.
 
     Methods
@@ -246,14 +248,14 @@ class BaseTemplateIterator(BaseModel):
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    type: ClassVar[Literal["random", "chain", "residue"]]
+    type: ClassVar[Literal["random", "random_residue", "chain", "residue"]]
 
     residue_types: list[Literal["amino_acid", "rna", "dna"]]
     amino_acid_atoms: list[str] = DEFAULT_AMINO_ACID_ATOMS
     rna_atoms: list[str] = DEFAULT_RNA_ATOMS
     dna_atoms: list[str] = DEFAULT_DNA_ATOMS
 
-    structure_df: pd.DataFrame  # NOTE: Comes from Simulator object
+    structure_df: ExcludedDataFrame  # NOTE: Comes from Simulator object
 
     @field_validator("structure_df", mode="after")  # type: ignore
     def _validate_structure_df(cls, v):
@@ -290,7 +292,7 @@ class BaseTemplateIterator(BaseModel):
     @abstractmethod
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, reside, and atom indices removed for alternates.
 
         Parameters
@@ -311,8 +313,7 @@ class BaseTemplateIterator(BaseModel):
 
     def subset_df_on_residues(self) -> pd.DataFrame:
         """Returns a df subset selecting only valid residues to consider."""
-        keep_residues = []
-        keep_atoms = []
+        keep_residues: list[str] = []
         if "amino_acid" in self.residue_types:
             keep_residues.extend(AMINO_ACID_RESIDUES)
         if "rna" in self.residue_types:
@@ -329,7 +330,7 @@ class BaseTemplateIterator(BaseModel):
         """Returns a df subset selecting only valid residues and atoms to consider."""
         subset_df = self.subset_df_on_residues()
 
-        keep_atoms = []
+        keep_atoms: list[str] = []
         if "amino_acid" in self.residue_types:
             keep_atoms.extend(self.amino_acid_atoms)
         if "rna" in self.residue_types:
@@ -342,7 +343,9 @@ class BaseTemplateIterator(BaseModel):
 
         return subset_df
 
-    def get_template_mass(self, atom_idxs: torch.Tensor | np.ndarray = None) -> float:
+    def get_template_scattering_potential(
+        self, atom_idxs: torch.Tensor | np.ndarray = None
+    ) -> float:
         """Get the mass (in amu) of a template structure given atom indexes."""
         if atom_idxs is None:
             atom_idxs = np.arange(len(self.structure_df))
@@ -350,16 +353,15 @@ class BaseTemplateIterator(BaseModel):
         if isinstance(atom_idxs, torch.Tensor):
             atom_idxs = atom_idxs.numpy()
 
-        total_mass = 0
+        total_scattering_potential = 0
         atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
         for atom, count in atom_counts.items():
-            if atom not in MASS_DICT:
-                raise ValueError(f"Unknown atom type: {atom}")
+            atom = atom.upper()
+            potentials = get_a_param(atom)
+            potentials = torch.sum(potentials).item()
+            total_scattering_potential += potentials * count
 
-            mass = MASS_DICT[atom]
-            total_mass += mass * count
-
-        return total_mass
+        return total_scattering_potential
 
 
 class RandomAtomTemplateIterator(BaseTemplateIterator):
@@ -387,7 +389,7 @@ class RandomAtomTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Randomly removes atoms (of specified types) from the structure.
 
         If coherent_removal is True, then a random starting index is chosen and a chunk
@@ -447,7 +449,7 @@ class ChainTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, residue, and atom indices removed for alternates.
 
         Parameters
@@ -578,7 +580,7 @@ class ResidueTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, residue, and atom indices removed for alternates.
 
         Parameters
@@ -645,7 +647,7 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
     def alternate_template_iter(
         self, inverted: bool = True
-    ) -> Iterator[tuple[list[str], list[int], torch.Tensor]]:
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Randomly removes residues (of specified types) from the structure.
 
         If coherent_removal is True, then a random starting index is chosen and a chunk
@@ -671,7 +673,7 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
         # Get the unique chain, residue pairs in order
         chain_res_pairs = subset_df[["chain", "residue_id"]].drop_duplicates()
-        chain_res_pairs = chain_res_pairs.to_records(index=False).tolist()  # type: ignore
+        chain_res_pairs = chain_res_pairs.to_records(index=False).tolist()
         chains = np.array([chain for chain, _ in chain_res_pairs])
         residues = np.array([residue for _, residue in chain_res_pairs])
 

@@ -7,6 +7,7 @@ from typing import Annotated, Any, ClassVar, Literal
 import numpy as np
 import pandas as pd
 import torch
+import mmdf
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from teamtomo_basemodel import ExcludedDataFrame
 from ttsim3d.scattering_potential import get_a_param
@@ -205,6 +206,8 @@ def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
         return ChainTemplateIterator(**data)
     elif iterator_type == "residue":
         return ResidueTemplateIterator(**data)
+    elif iterator_type == "alternate_template":
+        return AlternateTemplateIterator(**data)
     else:
         raise ValueError(f"Invalid template iterator type: {iterator_type}")
 
@@ -248,7 +251,7 @@ class BaseTemplateIterator(BaseModel):
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    type: ClassVar[Literal["random", "random_residue", "chain", "residue"]]
+    type: ClassVar[Literal["random", "random_residue", "chain", "residue", "alternate_template"]]
 
     residue_types: list[Literal["amino_acid", "rna", "dna"]]
     amino_acid_atoms: list[str] = DEFAULT_AMINO_ACID_ATOMS
@@ -721,3 +724,38 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
 
             yield chain_ids, residue_ids, torch.tensor(atom_idxs)
+
+# class AlternateTemplateIterator(BaseTemplateIterator):
+#     """Template iterator for using an alternative list of PDB files. 
+
+#     Attributes
+#     ----------
+#     type : Literal["alternate_template"]
+#         Discriminator field for differentiating between template iterator types.
+#     alternate_pdbs : list[str]
+#         List of paths of alternative PDB files to use (not including the original template)
+
+#     """
+#     type: ClassVar[Literal["alternate_template"]] = "alternate_template"
+#     alternate_pdbs: list[str]
+
+#     # we will first read in all the alternate pdbs, then we will make one big dataframe, 
+#     # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
+#     def alternate_template_iter(
+#             self, inverted: bool=True
+#     ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
+#         structure_df = self.structure_df
+#         dfs = []
+#         for i, pdb in enumerate(self.alternate_pdbs):
+#             df = mmdf.read(pdb)
+#             df["chain"] = f"added_chain_{i}"
+#             dfs.append(df)
+#         all_alt_dfs = pd.concat(dfs)
+#         self.structure_df = pd.concat([structure_df, all_alt_dfs]).reset_index() 
+#         for i in range(len(self.alternate_pdbs)):  # length of alternate pdbs sets the number of iterations
+#             chain_id = f"added_chain_{i}"
+#             residue_ids = [0, 2]
+
+#             if inverted:
+#                 atom_idxs = np.setdiff1d(np.arange(len(self.all_structures_df)), atom_idxs)
+#             yield chain_id, residue_ids, torch.tensor(atom_idxs)

@@ -322,7 +322,7 @@ class MosaicsManager(BaseModel):
             batch_size=batch_size,
         )
 
-        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)
+        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  # this is gonna be a big deal!
 
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###

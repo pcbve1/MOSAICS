@@ -2,8 +2,10 @@
 
 import warnings
 from typing import Literal, Union
-
+import sys
 import mmdf
+import mrcfile
+import pandas as pd
 import numpy as np
 import roma
 import torch
@@ -22,6 +24,23 @@ from ttsim3d.models import Simulator
 from .cross_correlation_core import cross_correlate_particle_stack
 from .mosaics_result import AlternateTemplateResult, MosaicsResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
+
+def volume_to_mrc(vol, mrc_path):
+    with mrcfile.new(mrc_path, overwrite=True) as mrc:
+        mrc.set_data(vol.cpu().numpy().astype(np.float32))
+
+def load_model_from_df(df, center_atoms):
+    atom_zyx = torch.tensor(df[["z", "y", "x"]].to_numpy()).float()  # (n_atoms, 3)
+
+    if center_atoms:
+        atom_zyx -= torch.mean(atom_zyx, dim=0, keepdim=True)  # center
+
+    atom_id = df["element"].str.upper().tolist()
+    atom_b_factor = torch.tensor(df["b_isotropic"].to_numpy()).float()
+
+    return atom_zyx, atom_id, atom_b_factor
+
+
 
 
 class MosaicsManager(BaseModel):
@@ -88,6 +107,7 @@ class MosaicsManager(BaseModel):
         default_volume: torch.Tensor,
         atom_indices: torch.Tensor,
         device: torch.device,
+        counter: int,
         batch_size: int = 2048,
     ) -> torch.Tensor:
         """Inner loop function for running the MOSAICS program.
@@ -106,6 +126,8 @@ class MosaicsManager(BaseModel):
             Which atoms should be removed from the template for the alternate model.
         device : torch.device
             The device to use for the computation. Should be either a CPU or GPU device.
+        counter: int
+            debug parameter to allow for visualization of the template
         batch_size : int, optional
             The batch size to use for the cross-correlation calculations. Default is
             2048.
@@ -113,6 +135,7 @@ class MosaicsManager(BaseModel):
         alternate_volume = self.simulator.run(
             device=str(device), atom_indices=atom_indices
         )
+        volume_to_mrc(alternate_volume, f"/home/brose/lab_projects/MOSAICS_test/templates/fake_templates/alt_template_{counter}.mrc")
 
         # Subtract the alternate_volume from the default_volume if
         # self.sim_removed_atoms_only is set.
@@ -134,6 +157,7 @@ class MosaicsManager(BaseModel):
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
+        
 
         return alt_cc
 
@@ -212,6 +236,7 @@ class MosaicsManager(BaseModel):
         """
         # Simulate the default (full-length) template volume
         default_template = self.simulator.run(device=str(device))
+        volume_to_mrc(default_template, "/home/brose/lab_projects/MOSAICS_test/templates/fake_templates/default_template.mrc")
 
         # Use the built-in processing functionality from Leopard-EM to compute
         # the filtered particle images (in Fourier space) and the projective filters.
@@ -292,7 +317,7 @@ class MosaicsManager(BaseModel):
             raise ValueError(
                 f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
             )
-
+        print("simulating default template...")
         if use_cache_file is not None:
             (
                 rot_mat,
@@ -309,11 +334,10 @@ class MosaicsManager(BaseModel):
                 default_template,
                 default_template_dft,
             ) = self._setup_mosaics_variables(device=device)
-
         #####################################################
         ### 1. Calculate default (full length) cross corr ###
         #####################################################
-
+        print("cross-correlating default template")
         default_cc = cross_correlate_particle_stack(
             particle_stack_images=particle_images,
             template_dft=default_template_dft,
@@ -322,20 +346,30 @@ class MosaicsManager(BaseModel):
             batch_size=batch_size,
         )
 
-        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  # this is gonna be a big deal!
+        default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  
 
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
         ######################################################
 
-        num_iters = self.template_iterator.num_alternate_structures
-
         # NOTE: When the inverted flag is set to True, the iterator will return the
         # indices of the atoms that should NOT be removed. This is opposite of the
         # the 'sim_removed_atoms_only' flag.
         inverted = not self.sim_removed_atoms_only
+        print('working on alternate templates')
+
         alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
         num_iters = self.template_iterator.num_alternate_structures
+        # creates an all-structure combination if structure is alternate PDBs TODO: fix this. it's a bad solution
+        if self.template_iterator.type == "alternate_template":
+            alt_base_structure = self.template_iterator.alt_structure_df
+        else:
+            alt_base_structure = self.template_iterator.structure_df
+        print("alt_base_structure length", alt_base_structure.shape[0])
+        self.simulator.structure_df = alt_base_structure
+        self.simulator.update_atomic_coords()
+        print("post-sim update: ", self.simulator.atom_positions_zyx.shape[0])
+        counter = 0
 
         alternate_template_results = []
         for chains, residues, atom_indices in tqdm.tqdm(
@@ -360,7 +394,9 @@ class MosaicsManager(BaseModel):
                     default_volume=default_template,
                     atom_indices=atom_indices,
                     device=device,
+                    counter=counter
                 )
+            counter += 1
             alt_cc = alt_cc.cpu().numpy()
             alt_sc_pot = self.template_iterator.get_template_scattering_potential(
                 atom_indices

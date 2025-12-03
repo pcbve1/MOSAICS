@@ -725,37 +725,86 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
             yield chain_ids, residue_ids, torch.tensor(atom_idxs)
 
-# class AlternateTemplateIterator(BaseTemplateIterator):
-#     """Template iterator for using an alternative list of PDB files. 
+class AlternateTemplateIterator(BaseTemplateIterator):
+    """Template iterator for using an alternative list of PDB files. 
 
-#     Attributes
-#     ----------
-#     type : Literal["alternate_template"]
-#         Discriminator field for differentiating between template iterator types.
-#     alternate_pdbs : list[str]
-#         List of paths of alternative PDB files to use (not including the original template)
+    Attributes
+    ----------
+    type : Literal["alternate_template"]
+        Discriminator field for differentiating between template iterator types.
+    alternate_pdbs : list[str]
+        List of paths of alternative PDB files to use (not including the original template)
+    """
+    type: ClassVar[Literal["alternate_template"]] = "alternate_template"
+    alternate_pdbs: list[str]
 
-#     """
-#     type: ClassVar[Literal["alternate_template"]] = "alternate_template"
-#     alternate_pdbs: list[str]
+    @property
+    def num_alternate_structures(self) -> int:
+        """returns the number of alternate structures (number of alternate PDB files)"""
+        return len(self.alternate_pdbs)
+    
+    @property
+    def alt_structure_df(self) -> pd.DataFrame:
+        # get parent structure
+        base_df = self.structure_df  
 
-#     # we will first read in all the alternate pdbs, then we will make one big dataframe, 
-#     # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
-#     def alternate_template_iter(
-#             self, inverted: bool=True
-#     ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
-#         structure_df = self.structure_df
-#         dfs = []
-#         for i, pdb in enumerate(self.alternate_pdbs):
-#             df = mmdf.read(pdb)
-#             df["chain"] = f"added_chain_{i}"
-#             dfs.append(df)
-#         all_alt_dfs = pd.concat(dfs)
-#         self.structure_df = pd.concat([structure_df, all_alt_dfs]).reset_index() 
-#         for i in range(len(self.alternate_pdbs)):  # length of alternate pdbs sets the number of iterations
-#             chain_id = f"added_chain_{i}"
-#             residue_ids = [0, 2]
+        dfs = []
+        for i, pdb in enumerate(self.alternate_pdbs):
+            df = mmdf.read(pdb)
+            df["chain"] = f"_ac{i}"
+            dfs.append(df)
 
-#             if inverted:
-#                 atom_idxs = np.setdiff1d(np.arange(len(self.all_structures_df)), atom_idxs)
-#             yield chain_id, residue_ids, torch.tensor(atom_idxs)
+        all_alt_dfs = pd.concat(dfs, ignore_index=True)
+
+        return pd.concat([base_df, all_alt_dfs], ignore_index=True)
+
+
+    # we will first read in all the alternate pdbs, then we will make one big dataframe, 
+    # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
+    def alternate_template_iter(
+            self, inverted: bool=True
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
+        """Iterate over alternate templates by removing all but one alternate structure at a time.
+
+        Parameters
+        ----------
+        
+        Yields
+        ------
+        """
+        # maybe I should create a new pdb file and load that into the simulator
+        subset_df = self.subset_df_on_residues_and_atoms()
+        subset_df = subset_df.reset_index(drop=True)
+        subset_df["original_index"] = subset_df.index
+
+        all_added_chains = [chain for chain in self.structure_df["chain"] 
+                        if chain.startswith("_ac")]
+
+        for i in range(self.num_alternate_structures):
+            # Current alternate's chains
+            current_alt_chains = [chain for chain in all_added_chains 
+                                if chain == f"_ac{i}"]
+            
+            # Chains to REMOVE: all other alternates
+            chains_to_remove= [chain for chain in all_added_chains 
+                                if not chain == f"_ac{i}"]
+            
+            
+            # Get atoms to remove (all alternates except current one)
+            df_remove = subset_df[subset_df["chain"].isin(chains_to_remove)]
+            atom_idxs = df_remove["original_index"].values
+            
+            if not inverted:
+                # If not inverted, return atoms to KEEP instead
+                atom_idxs = np.setdiff1d(
+                    np.arange(len(self.structure_df)), 
+                    atom_idxs ) # type: ignore
+            
+            # Chains that are kept in this iteration
+            original_chains = [chain for chain in self.structure_df["chain"] 
+                               if not chain.startswith("added_chain_")]
+            chains_kept = list(set(original_chains)) + current_alt_chains
+            residue_ids = subset_df[subset_df["chain"].isin(chains_kept)]["residue_id"]
+            residue_ids = residue_ids.unique().tolist()
+            
+            yield chains_kept, residue_ids, torch.tensor(atom_idxs)

@@ -29,19 +29,8 @@ def volume_to_mrc(vol, mrc_path):
     with mrcfile.new(mrc_path, overwrite=True) as mrc:
         mrc.set_data(vol.cpu().numpy().astype(np.float32))
 
-def load_model_from_df(df, center_atoms):
-    atom_zyx = torch.tensor(df[["z", "y", "x"]].to_numpy()).float()  # (n_atoms, 3)
 
-    if center_atoms:
-        atom_zyx -= torch.mean(atom_zyx, dim=0, keepdim=True)  # center
-
-    atom_id = df["element"].str.upper().tolist()
-    atom_b_factor = torch.tensor(df["b_isotropic"].to_numpy()).float()
-
-    return atom_zyx, atom_id, atom_b_factor
-
-
-
+template_dir = "/home/brose/lab_projects/MOSAICS_test/templates/chains_alt_template_2"
 
 class MosaicsManager(BaseModel):
     """Class for importing, running, and exporting MOSAICS program data.
@@ -94,7 +83,7 @@ class MosaicsManager(BaseModel):
         data["template_iterator"]["structure_df"] = pdb_df
 
         # Create the template iterator using the factory method
-        template_iterator = instantiate_template_iterator(data["template_iterator"])
+        template_iterator = instantiate_template_iterator(cls, data["template_iterator"])
         data["template_iterator"] = template_iterator
 
         return cls(**data)
@@ -135,7 +124,7 @@ class MosaicsManager(BaseModel):
         alternate_volume = self.simulator.run(
             device=str(device), atom_indices=atom_indices
         )
-        volume_to_mrc(alternate_volume, f"/home/brose/lab_projects/MOSAICS_test/templates/fake_templates/alt_template_{counter}.mrc")
+        volume_to_mrc(alternate_volume, f"{template_dir}/alt_template_x_{counter}.mrc")
 
         # Subtract the alternate_volume from the default_volume if
         # self.sim_removed_atoms_only is set.
@@ -235,8 +224,10 @@ class MosaicsManager(BaseModel):
             The DFT of the default (full-length) volume.
         """
         # Simulate the default (full-length) template volume
+        print(self.simulator.pdb_filepath)
         default_template = self.simulator.run(device=str(device))
-        volume_to_mrc(default_template, "/home/brose/lab_projects/MOSAICS_test/templates/fake_templates/default_template.mrc")
+        
+        volume_to_mrc(default_template, f"{template_dir}/default_template.mrc")
 
         # Use the built-in processing functionality from Leopard-EM to compute
         # the filtered particle images (in Fourier space) and the projective filters.
@@ -338,6 +329,7 @@ class MosaicsManager(BaseModel):
         ### 1. Calculate default (full length) cross corr ###
         #####################################################
         print("cross-correlating default template")
+
         default_cc = cross_correlate_particle_stack(
             particle_stack_images=particle_images,
             template_dft=default_template_dft,
@@ -345,7 +337,7 @@ class MosaicsManager(BaseModel):
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
-
+        self.template_iterator._simulator = self.simulator
         default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  
 
         ######################################################
@@ -356,19 +348,11 @@ class MosaicsManager(BaseModel):
         # indices of the atoms that should NOT be removed. This is opposite of the
         # the 'sim_removed_atoms_only' flag.
         inverted = not self.sim_removed_atoms_only
-        print('working on alternate templates')
-
-        alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
+        print('Working on alternate templates')
         num_iters = self.template_iterator.num_alternate_structures
-        # creates an all-structure combination if structure is alternate PDBs TODO: fix this. it's a bad solution
-        if self.template_iterator.type == "alternate_template":
-            alt_base_structure = self.template_iterator.alt_structure_df
-        else:
-            alt_base_structure = self.template_iterator.structure_df
-        print("alt_base_structure length", alt_base_structure.shape[0])
-        self.simulator.structure_df = alt_base_structure
-        self.simulator.update_atomic_coords()
-        print("post-sim update: ", self.simulator.atom_positions_zyx.shape[0])
+        alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
+
+        # need to fix this!!! 
         counter = 0
 
         alternate_template_results = []
@@ -387,6 +371,7 @@ class MosaicsManager(BaseModel):
                 alt_sc_pot = default_sc_pot
 
             else:
+                # be able to change the pixel size here in the inner loop. 
                 alt_cc = self._mosaics_inner_loop(
                     particle_images=particle_images,
                     rot_mat=rot_mat,

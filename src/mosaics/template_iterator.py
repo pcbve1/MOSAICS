@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 import mmdf
+from ttsim3d.models import Simulator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from teamtomo_basemodel import ExcludedDataFrame
 from ttsim3d.scattering_potential import get_a_param
@@ -195,7 +196,7 @@ def sliding_window_iterator(
         yield np.arange(i, min(i + window_width, length))
 
 
-def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
+def instantiate_template_iterator(_simulator: Simulator, data: dict) -> "BaseTemplateIterator":
     """Factory function for instantiating a template iterator object."""
     iterator_type = data.pop("type", None)
     if iterator_type == "random":
@@ -207,7 +208,7 @@ def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
     elif iterator_type == "residue":
         return ResidueTemplateIterator(**data)
     elif iterator_type == "alternate_template":
-        return AlternateTemplateIterator(**data)
+        return AlternateTemplateIterator(_simulator, **data)
     else:
         raise ValueError(f"Invalid template iterator type: {iterator_type}")
 
@@ -314,6 +315,10 @@ class BaseTemplateIterator(BaseModel):
             on the atom types specified in the configuration.
         """
 
+    def update_structure_df(self, outside_df):
+        outside_df["original_index"] = outside_df.index
+        self.structure_df = outside_df
+
     def subset_df_on_residues(self) -> pd.DataFrame:
         """Returns a df subset selecting only valid residues to consider."""
         keep_residues: list[str] = []
@@ -323,7 +328,6 @@ class BaseTemplateIterator(BaseModel):
             keep_residues.extend(RNA_RESIDUES)
         if "dna" in self.residue_types:
             keep_residues.extend(DNA_RESIDUES)
-
         subset_df = self.structure_df[self.structure_df["residue"].isin(keep_residues)]
         subset_df.set_index("original_index", inplace=True, drop=False)
 
@@ -464,6 +468,7 @@ class ChainTemplateIterator(BaseTemplateIterator):
         unique_chain_ids = subset_df["chain"].unique()
 
         for chain_id in unique_chain_ids:
+            print(chain_id)
             residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
             residue_ids = residue_ids.unique().tolist()
 
@@ -732,32 +737,37 @@ class AlternateTemplateIterator(BaseTemplateIterator):
     ----------
     type : Literal["alternate_template"]
         Discriminator field for differentiating between template iterator types.
-    alternate_pdbs : list[str]
-        List of paths of alternative PDB files to use (not including the original template)
+    alternate_pdb_filepath: list[str]
+        pdb with alternate chains added onto it. 
+
     """
+
+    # will need to just pass in a pdb file and a list of chains. I can make a further pdb_file_maker
+    # with a 
     type: ClassVar[Literal["alternate_template"]] = "alternate_template"
-    alternate_pdbs: list[str]
+    alternate_pdb_filepath: str
+    
+    def __init__(self, _simulator: Simulator, **data:Any):
+        super().__init__(**data)
+        self._sim_obj = _simulator
 
     @property
     def num_alternate_structures(self) -> int:
         """returns the number of alternate structures (number of alternate PDB files)"""
-        return len(self.alternate_pdbs)
+        self.update_structure_df(mmdf.read(self.alternate_pdb_filepath))
+        self.change_mm_pdb_file()
+        print("num_chains", self.structure_df['chain'].unique())
+        unique_chain_ids = [chain for chain in self.structure_df["chain"].unique() if chain.startswith("_")]
+        print("unique chains", len(unique_chain_ids))
+        return len(unique_chain_ids)
     
-    @property
-    def alt_structure_df(self) -> pd.DataFrame:
-        # get parent structure
-        base_df = self.structure_df  
+    # I NEED TO CHANGE THE PDB FILE PASSED TO THE SIMULATOR. I CAN DO THAT IN MOSAICS MANAGER BUT I'D RATHER NOT???
+    # and if I can do that, changing the pixel size would be awesome too. 
 
-        dfs = []
-        for i, pdb in enumerate(self.alternate_pdbs):
-            df = mmdf.read(pdb)
-            df["chain"] = f"_ac{i}"
-            dfs.append(df)
+    def change_mm_pdb_file(self):
+       self._sim_obj.pdb_filepath = self.alternate_pdb_filepath
 
-        all_alt_dfs = pd.concat(dfs, ignore_index=True)
-
-        return pd.concat([base_df, all_alt_dfs], ignore_index=True)
-
+    
 
     # we will first read in all the alternate pdbs, then we will make one big dataframe, 
     # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
@@ -772,39 +782,30 @@ class AlternateTemplateIterator(BaseTemplateIterator):
         Yields
         ------
         """
-        # maybe I should create a new pdb file and load that into the simulator
+        
         subset_df = self.subset_df_on_residues_and_atoms()
         subset_df = subset_df.reset_index(drop=True)
-        subset_df["original_index"] = subset_df.index
-
-        all_added_chains = [chain for chain in self.structure_df["chain"] 
-                        if chain.startswith("_ac")]
-
-        for i in range(self.num_alternate_structures):
-            # Current alternate's chains
-            current_alt_chains = [chain for chain in all_added_chains 
-                                if chain == f"_ac{i}"]
-            
-            # Chains to REMOVE: all other alternates
-            chains_to_remove= [chain for chain in all_added_chains 
-                                if not chain == f"_ac{i}"]
-            
-            
-            # Get atoms to remove (all alternates except current one)
-            df_remove = subset_df[subset_df["chain"].isin(chains_to_remove)]
-            atom_idxs = df_remove["original_index"].values
-            
-            if not inverted:
-                # If not inverted, return atoms to KEEP instead
-                atom_idxs = np.setdiff1d(
-                    np.arange(len(self.structure_df)), 
-                    atom_idxs ) # type: ignore
-            
-            # Chains that are kept in this iteration
-            original_chains = [chain for chain in self.structure_df["chain"] 
-                               if not chain.startswith("added_chain_")]
-            chains_kept = list(set(original_chains)) + current_alt_chains
-            residue_ids = subset_df[subset_df["chain"].isin(chains_kept)]["residue_id"]
+        unique_chain_ids = [chain for chain in subset_df["chain"].unique() if chain.startswith("_")]
+        for chain_id in unique_chain_ids:
+            print(chain_id)
+            residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
             residue_ids = residue_ids.unique().tolist()
-            
-            yield chains_kept, residue_ids, torch.tensor(atom_idxs)
+
+            chain_ids = [chain_id] * len(residue_ids)
+
+            # Merge the DataFrame to keep only positions where the chain and residue
+            # pairs match the current window
+            # NOTE: When the dataframe is merged, the row indexes are overwritten...
+            # We use a dummy column to keep track of the original indexes by re-indexing
+            # the dataframe after the merge.
+            merge_df = pd.DataFrame({"chain": chain_ids, "residue_id": residue_ids})
+            df_window = subset_df.merge(merge_df)
+            df_window = df_window.set_index("original_index")
+
+            # Get the atom indexes for the current window (atoms that should be removed)
+            atom_idxs = df_window.index
+
+            if inverted:
+                atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+
+            yield chain_ids, residue_ids, torch.tensor(atom_idxs)

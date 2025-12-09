@@ -22,6 +22,8 @@ DEFAULT_AMINO_ACID_ATOMS = ["N", "CA", "C", "O"]
 DEFAULT_RNA_ATOMS = ["C1'", "C2'", "C3'", "C4'", "O4'"]
 DEFAULT_DNA_ATOMS = ["C1'", "C2'", "C3'", "C4'", "O4'"]
 
+#TODO: change the iterator to accept a simulator object and return a volume instead of chain ids
+
 # Names in the "residue" column of the PDB file which correspond to the residue types
 AMINO_ACID_RESIDUES = [
     "ALA",
@@ -196,7 +198,7 @@ def sliding_window_iterator(
         yield np.arange(i, min(i + window_width, length))
 
 
-def instantiate_template_iterator(_simulator: Simulator, data: dict) -> "BaseTemplateIterator":
+def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
     """Factory function for instantiating a template iterator object."""
     iterator_type = data.pop("type", None)
     if iterator_type == "random":
@@ -207,8 +209,8 @@ def instantiate_template_iterator(_simulator: Simulator, data: dict) -> "BaseTem
         return ChainTemplateIterator(**data)
     elif iterator_type == "residue":
         return ResidueTemplateIterator(**data)
-    elif iterator_type == "alternate_template":
-        return AlternateTemplateIterator(_simulator, **data)
+    elif iterator_type == "added_template":
+        return AddedTemplateIterator(**data)
     else:
         raise ValueError(f"Invalid template iterator type: {iterator_type}")
 
@@ -235,6 +237,8 @@ class BaseTemplateIterator(BaseModel):
         Default is ['C1', 'C2', 'C3', 'C4', 'O4'].
     structure_df : ExcludedDataFrame
         Underlying Pandas DataFrame for the PDB model.
+    simulator : Simulator
+        Simulator object used to produce a volume
 
     Methods
     -------
@@ -252,7 +256,7 @@ class BaseTemplateIterator(BaseModel):
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    type: ClassVar[Literal["random", "random_residue", "chain", "residue", "alternate_template"]]
+    type: ClassVar[Literal["random", "random_residue", "chain", "residue", "added_template"]]
 
     residue_types: list[Literal["amino_acid", "rna", "dna"]]
     amino_acid_atoms: list[str] = DEFAULT_AMINO_ACID_ATOMS
@@ -260,6 +264,9 @@ class BaseTemplateIterator(BaseModel):
     dna_atoms: list[str] = DEFAULT_DNA_ATOMS
 
     structure_df: ExcludedDataFrame  # NOTE: Comes from Simulator object
+    simulator : Simulator
+
+# did not include device or simulator here, even though I probably SHOULD move the siumulator under the iterator. 
 
     @field_validator("structure_df", mode="after")  # type: ignore
     def _validate_structure_df(cls, v):
@@ -298,6 +305,8 @@ class BaseTemplateIterator(BaseModel):
         self, inverted: bool = True
     ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
         """Iterator over chain, reside, and atom indices removed for alternates.
+
+        TODO: fix this docstring to mention the volume
 
         Parameters
         ----------
@@ -369,6 +378,23 @@ class BaseTemplateIterator(BaseModel):
             total_scattering_potential += potentials * count
 
         return total_scattering_potential
+    
+    # add a get_volume thing here, that takes in a pdb structure, pixel size, and atom indices and produces a volume
+    def get_volume(self, 
+                   atom_indices: torch.Tensor,
+                   pixel_size: float = None,  
+                   pdb_filepath: str = None, 
+                   added_b: float = None, 
+                   scaled_b: float = None,
+                   device: str= "cpu"
+                   ) -> torch.Tensor:
+        '''Uses ttsim3d simulator to produce a torch tensor volume'''
+        if not None in [pixel_size, pdb_filepath, added_b, scaled_b]:
+            self.simulator.pixel_spacing = pixel_size
+            self.simulator.pdb_filepath = pdb_filepath
+            self.simulator.additional_b_factor = added_b
+            self.simulator.b_factor_scaling = scaled_b
+        return self.simulator.run(device=str(device), atom_indices=atom_indices)
 
 
 class RandomAtomTemplateIterator(BaseTemplateIterator):
@@ -435,7 +461,9 @@ class RandomAtomTemplateIterator(BaseTemplateIterator):
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
 
-            yield [None], [None], torch.tensor(atom_idxs)
+            volume = self.get_volume(atom_indices=atom_idxs)
+
+            yield [None], [None], torch.tensor(atom_idxs), volume
 
 
 class ChainTemplateIterator(BaseTemplateIterator):
@@ -488,8 +516,10 @@ class ChainTemplateIterator(BaseTemplateIterator):
 
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+            
+            volume = self.get_volume(atom_indices=atom_idxs)
 
-            yield chain_ids, residue_ids, torch.tensor(atom_idxs)
+            yield chain_ids, residue_ids, torch.tensor(atom_idxs), volume
 
 
 class ResidueTemplateIterator(BaseTemplateIterator):
@@ -626,8 +656,10 @@ class ResidueTemplateIterator(BaseTemplateIterator):
 
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+            
+            volume = self.get_volume(atom_indices=atom_idxs)
 
-            yield chain_ids.tolist(), residue_ids.tolist(), torch.tensor(atom_idxs)
+            yield chain_ids.tolist(), residue_ids.tolist(), torch.tensor(atom_idxs), volume
 
 
 class RandomResidueTemplateIterator(BaseTemplateIterator):
@@ -727,15 +759,17 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+            
+            volume = self.get_volume(atom_indices=atom_idxs)
 
-            yield chain_ids, residue_ids, torch.tensor(atom_idxs)
+            yield chain_ids, residue_ids, torch.tensor(atom_idxs), volume
 
-class AlternateTemplateIterator(BaseTemplateIterator):
+class AddedTemplateIterator(BaseTemplateIterator):
     """Template iterator for using an alternative list of PDB files. 
 
     Attributes
     ----------
-    type : Literal["alternate_template"]
+    type : Literal["added_template"]
         Discriminator field for differentiating between template iterator types.
     alternate_pdb_filepath: list[str]
         pdb with alternate chains added onto it. 
@@ -744,7 +778,7 @@ class AlternateTemplateIterator(BaseTemplateIterator):
 
     # will need to just pass in a pdb file and a list of chains. I can make a further pdb_file_maker
     # with a 
-    type: ClassVar[Literal["alternate_template"]] = "alternate_template"
+    type: ClassVar[Literal["added_template"]] = "added_template"
     alternate_pdb_filepath: str
     
     def __init__(self, _simulator: Simulator, **data:Any):
@@ -807,5 +841,7 @@ class AlternateTemplateIterator(BaseTemplateIterator):
 
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+            
+            volume = self.get_volume(atom_indices=atom_idxs)
 
-            yield chain_ids, residue_ids, torch.tensor(atom_idxs)
+            yield chain_ids, residue_ids, torch.tensor(atom_idxs), volume

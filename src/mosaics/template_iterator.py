@@ -196,7 +196,7 @@ def sliding_window_iterator(
         yield np.arange(i, min(i + window_width, length))
 
 
-def instantiate_template_iterator(_simulator: Simulator, data: dict) -> "BaseTemplateIterator":
+def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
     """Factory function for instantiating a template iterator object."""
     iterator_type = data.pop("type", None)
     if iterator_type == "random":
@@ -207,8 +207,8 @@ def instantiate_template_iterator(_simulator: Simulator, data: dict) -> "BaseTem
         return ChainTemplateIterator(**data)
     elif iterator_type == "residue":
         return ResidueTemplateIterator(**data)
-    elif iterator_type == "alternate_template":
-        return AlternateTemplateIterator(_simulator, **data)
+    elif iterator_type == "added_template":
+        return AddedTemplateIterator(**data)
     else:
         raise ValueError(f"Invalid template iterator type: {iterator_type}")
 
@@ -252,7 +252,7 @@ class BaseTemplateIterator(BaseModel):
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    type: ClassVar[Literal["random", "random_residue", "chain", "residue", "alternate_template"]]
+    type: ClassVar[Literal["random", "random_residue", "chain", "residue", "added_template"]]
 
     residue_types: list[Literal["amino_acid", "rna", "dna"]]
     amino_acid_atoms: list[str] = DEFAULT_AMINO_ACID_ATOMS
@@ -315,10 +315,6 @@ class BaseTemplateIterator(BaseModel):
             on the atom types specified in the configuration.
         """
 
-    def update_structure_df(self, outside_df):
-        outside_df["original_index"] = outside_df.index
-        self.structure_df = outside_df
-
     def subset_df_on_residues(self) -> pd.DataFrame:
         """Returns a df subset selecting only valid residues to consider."""
         keep_residues: list[str] = []
@@ -364,11 +360,16 @@ class BaseTemplateIterator(BaseModel):
         atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
         for atom, count in atom_counts.items():
             atom = atom.upper()
-            potentials = get_a_param(atom)
+            potentials = get_a_param([atom]) # pass in list of atoms, since for 2 letters, the param thinks you're passing in a list
             potentials = torch.sum(potentials).item()
             total_scattering_potential += potentials * count
 
         return total_scattering_potential
+    
+    def get_default_template_idxs(self) -> torch.Tensor:
+        default_df = self.structure_df
+        default_df.set_index("original_index")
+        return torch.tensor(default_df.index)
 
 
 class RandomAtomTemplateIterator(BaseTemplateIterator):
@@ -730,7 +731,7 @@ class RandomResidueTemplateIterator(BaseTemplateIterator):
 
             yield chain_ids, residue_ids, torch.tensor(atom_idxs)
 
-class AlternateTemplateIterator(BaseTemplateIterator):
+class AddedTemplateIterator(BaseTemplateIterator):
     """Template iterator for using an alternative list of PDB files. 
 
     Attributes
@@ -745,30 +746,19 @@ class AlternateTemplateIterator(BaseTemplateIterator):
     # will need to just pass in a pdb file and a list of chains. I can make a further pdb_file_maker
     # with a 
     type: ClassVar[Literal["alternate_template"]] = "alternate_template"
-    alternate_pdb_filepath: str
     
-    def __init__(self, _simulator: Simulator, **data:Any):
-        super().__init__(**data)
-        self._sim_obj = _simulator
-
     @property
     def num_alternate_structures(self) -> int:
         """returns the number of alternate structures (number of alternate PDB files)"""
-        self.update_structure_df(mmdf.read(self.alternate_pdb_filepath))
-        self.change_mm_pdb_file()
-        print("num_chains", self.structure_df['chain'].unique())
         unique_chain_ids = [chain for chain in self.structure_df["chain"].unique() if chain.startswith("_")]
-        print("unique chains", len(unique_chain_ids))
         return len(unique_chain_ids)
     
-    # I NEED TO CHANGE THE PDB FILE PASSED TO THE SIMULATOR. I CAN DO THAT IN MOSAICS MANAGER BUT I'D RATHER NOT???
-    # and if I can do that, changing the pixel size would be awesome too. 
-
-    def change_mm_pdb_file(self):
-       self._sim_obj.pdb_filepath = self.alternate_pdb_filepath
-
+    def get_default_template_idxs(self) -> torch.Tensor:
+        default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain.startswith("_")]
+        default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
+        default_df.set_index("original_index")
+        return torch.tensor(default_df.index)
     
-
     # we will first read in all the alternate pdbs, then we will make one big dataframe, 
     # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
     def alternate_template_iter(

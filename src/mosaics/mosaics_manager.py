@@ -30,7 +30,7 @@ def volume_to_mrc(vol, mrc_path):
         mrc.set_data(vol.cpu().numpy().astype(np.float32))
 
 
-template_dir = "/home/brose/lab_projects/MOSAICS_test/templates/chains_alt_template_2"
+template_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_template_test"
 
 class MosaicsManager(BaseModel):
     """Class for importing, running, and exporting MOSAICS program data.
@@ -83,7 +83,7 @@ class MosaicsManager(BaseModel):
         data["template_iterator"]["structure_df"] = pdb_df
 
         # Create the template iterator using the factory method
-        template_iterator = instantiate_template_iterator(cls, data["template_iterator"])
+        template_iterator = instantiate_template_iterator(data["template_iterator"])
         data["template_iterator"] = template_iterator
 
         return cls(**data)
@@ -224,8 +224,8 @@ class MosaicsManager(BaseModel):
             The DFT of the default (full-length) volume.
         """
         # Simulate the default (full-length) template volume
-        print(self.simulator.pdb_filepath)
-        default_template = self.simulator.run(device=str(device))
+        default_template = self.simulator.run(
+            atom_indices=self.template_iterator.get_default_template_idxs(), device=str(device))  # will need to replace this!
         
         volume_to_mrc(default_template, f"{template_dir}/default_template.mrc")
 
@@ -337,7 +337,6 @@ class MosaicsManager(BaseModel):
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
-        self.template_iterator._simulator = self.simulator
         default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  
 
         ######################################################

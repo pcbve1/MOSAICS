@@ -30,7 +30,7 @@ def volume_to_mrc(vol, mrc_path):
         mrc.set_data(vol.cpu().numpy().astype(np.float32))
 
 
-template_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_template_test"
+template_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_template_test_2"
 
 class MosaicsManager(BaseModel):
     """Class for importing, running, and exporting MOSAICS program data.

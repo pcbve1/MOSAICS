@@ -315,7 +315,6 @@ class MosaicsManager(BaseModel):
         #####################################################
         ### 1. Calculate default (full length) cross corr ###
         #####################################################
-        print("cross-correlating default template")
 
         default_cc = cross_correlate_particle_stack(
             particle_stack_images=particle_images,
@@ -325,7 +324,7 @@ class MosaicsManager(BaseModel):
             batch_size=batch_size,
         )
         default_sc_pot = self.template_iterator.get_template_scattering_potential(None)  
-
+        print("Default template done!")
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
         ######################################################
@@ -334,7 +333,6 @@ class MosaicsManager(BaseModel):
         # indices of the atoms that should NOT be removed. This is opposite of the
         # the 'sim_removed_atoms_only' flag.
         inverted = not self.sim_removed_atoms_only
-        print('Working on alternate templates')
         num_iters = self.template_iterator.num_alternate_structures
         alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
 

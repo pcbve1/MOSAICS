@@ -248,6 +248,8 @@ class BaseTemplateIterator(BaseModel):
         Get the mass (in amu) of the default template structure.
     get_alternate_template_mass()
         Get the mass (in amu) of all the alternate template structures as a list.
+    get_default_template_idxs()
+        Get the atom indices of the structure_df corresponding to the default template
     """
 
     model_config: ConfigDict = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -367,6 +369,7 @@ class BaseTemplateIterator(BaseModel):
         return total_scattering_potential
     
     def get_default_template_idxs(self) -> torch.Tensor:
+        """Return the atom indices corresponding to the default template"""
         default_df = self.structure_df
         default_df.set_index("original_index")
         return torch.tensor(default_df.index)
@@ -736,58 +739,84 @@ class AddedTemplateIterator(BaseTemplateIterator):
 
     Attributes
     ----------
-    type : Literal["alternate_template"]
+    type : Literal["added_template"]
         Discriminator field for differentiating between template iterator types.
-    alternate_pdb_filepath: list[str]
-        pdb with alternate chains added onto it. 
-
+    added_startswith : list[str]
+        specified characters that all added chain names start with.
+        Default is ["_"]
     """
 
-    # will need to just pass in a pdb file and a list of chains. I can make a further pdb_file_maker
-    # with a 
-    type: ClassVar[Literal["alternate_template"]] = "alternate_template"
+    type: ClassVar[Literal["added_template"]] = "added_template"
+    added_startswith: list[str] = Field(default_factory=lambda: ["_"])
+    
+
+    def __init__(self, added_startswith: list[str] | None = None, **data):  # need to initialize the default start character
+        super().__init__(**data)
+        self.added_startswith = added_startswith or ["_"]
     
     @property
     def num_alternate_structures(self) -> int:
         """returns the number of alternate structures (number of alternate PDB files)"""
-        unique_chain_ids = [chain for chain in self.structure_df["chain"].unique() if chain.startswith("_")]
+        unique_chain_ids = [chain for chain in self.structure_df["chain"].unique() if chain[0] in self.added_startswith]
         return len(unique_chain_ids)
     
     def get_default_template_idxs(self) -> torch.Tensor:
-        default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain.startswith("_")]
+        """Removes all added chain indices and simulates the default 
+        
+        Added chains must start with something in self.added_startswith
+
+        Returns
+        -------
+        torch.Tensor
+        tensor of the atom indices to simulate to produce the default template
+        """
+        default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain[0] in self.added_startswith]
         default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
-        default_df.set_index("original_index")
+        default_df = default_df.set_index("original_index")
         return torch.tensor(default_df.index)
     
-    # we will first read in all the alternate pdbs, then we will make one big dataframe, 
-    # with chains with names like "chain_1" "chain_2", then we will iterate over those. 
+    def get_template_scattering_potential(
+        self, atom_idxs: torch.Tensor | np.ndarray = None
+    ) -> float:
+        """Get the mass (in amu) of a template structure given atom indexes. Default template does not contain alt chains"""
+        if atom_idxs is None:
+            atom_idxs = self.get_default_template_idxs().numpy()
+
+        if isinstance(atom_idxs, torch.Tensor):
+            atom_idxs = atom_idxs.numpy()
+
+        total_scattering_potential = 0
+        atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
+        for atom, count in atom_counts.items():
+            atom = atom.upper()
+            potentials = get_a_param([atom]) # pass in list of atoms, since for 2 letters, the param thinks you're passing in a list
+            potentials = torch.sum(potentials).item()
+            total_scattering_potential += potentials * count
+
+        return total_scattering_potential
+    
     def alternate_template_iter(
             self, inverted: bool=True
     ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
-        """Iterate over alternate templates by removing all but one alternate structure at a time.
+        """Iterate over alternate templates by removing all but one alternate chain at a time.
+
+        Added chains must start with something in the self.added_startswith list
 
         Parameters
         ----------
-        
-        Yields
-        ------
+        inverted : bool
+            If 'True', return the indexes of atoms to remove rather than keep.
         """
         
         subset_df = self.subset_df_on_residues_and_atoms()
         subset_df = subset_df.reset_index(drop=True)
-        unique_chain_ids = [chain for chain in subset_df["chain"].unique() if chain.startswith("_")]
+        # set unique chains as those without the 
+        unique_chain_ids = [chain for chain in subset_df["chain"].unique() if chain[0] in self.added_startswith]
         for chain_id in unique_chain_ids:
-            print(chain_id)
             residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
             residue_ids = residue_ids.unique().tolist()
 
             chain_ids = [chain_id] * len(residue_ids)
-
-            # Merge the DataFrame to keep only positions where the chain and residue
-            # pairs match the current window
-            # NOTE: When the dataframe is merged, the row indexes are overwritten...
-            # We use a dummy column to keep track of the original indexes by re-indexing
-            # the dataframe after the merge.
             merge_df = pd.DataFrame({"chain": chain_ids, "residue_id": residue_ids})
             df_window = subset_df.merge(merge_df)
             df_window = df_window.set_index("original_index")

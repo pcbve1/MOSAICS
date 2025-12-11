@@ -79,7 +79,7 @@ class AlternateTemplateResult(BaseModel):
             delta = self.scattering_potential_alternate
         else:
             delta = (
-                self.scattering_potential_full_length
+                self.scattering_potential_full_length 
                 - self.scattering_potential_alternate
             )
         return delta / self.scattering_potential_full_length

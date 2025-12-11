@@ -739,14 +739,14 @@ class AddedTemplateIterator(BaseTemplateIterator):
 
     Attributes
     ----------
-    type : Literal["alternate_template"]
+    type : Literal["added_template"]
         Discriminator field for differentiating between template iterator types.
     added_startswith : list[str]
         specified characters that all added chain names start with.
         Default is ["_"]
     """
 
-    type: ClassVar[Literal["alternate_template"]] = "alternate_template"
+    type: ClassVar[Literal["added_template"]] = "added_template"
     added_startswith: list[str] = Field(default_factory=lambda: ["_"])
     
 
@@ -774,6 +774,26 @@ class AddedTemplateIterator(BaseTemplateIterator):
         default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
         default_df = default_df.set_index("original_index")
         return torch.tensor(default_df.index)
+    
+    def get_template_scattering_potential(
+        self, atom_idxs: torch.Tensor | np.ndarray = None
+    ) -> float:
+        """Get the mass (in amu) of a template structure given atom indexes. Default template does not contain alt chains"""
+        if atom_idxs is None:
+            atom_idxs = self.get_default_template_idxs().numpy()
+
+        if isinstance(atom_idxs, torch.Tensor):
+            atom_idxs = atom_idxs.numpy()
+
+        total_scattering_potential = 0
+        atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
+        for atom, count in atom_counts.items():
+            atom = atom.upper()
+            potentials = get_a_param([atom]) # pass in list of atoms, since for 2 letters, the param thinks you're passing in a list
+            potentials = torch.sum(potentials).item()
+            total_scattering_potential += potentials * count
+
+        return total_scattering_potential
     
     def alternate_template_iter(
             self, inverted: bool=True

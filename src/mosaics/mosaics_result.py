@@ -55,6 +55,8 @@ class AlternateTemplateResult(BaseModel):
         'sim_removed_atoms_only' is True, this will be the scattering potential
         of the removed atoms only. Otherwise, it will be the scattering potential of the
         full model minus the removed atoms.
+    added_chains : bool
+        Whether added chains are being simulated or removed. 
 
     Methods
     -------
@@ -72,6 +74,7 @@ class AlternateTemplateResult(BaseModel):
     sim_removed_atoms_only: bool
     scattering_potential_full_length: float
     scattering_potential_alternate: float
+    added_chains: bool
 
     def expected_correlation_decrease(self) -> float:
         """Relative decrease in cross-corr due to change in scattering potential."""
@@ -79,7 +82,7 @@ class AlternateTemplateResult(BaseModel):
             delta = self.scattering_potential_alternate
         else:
             delta = (
-                self.scattering_potential_full_length
+                self.scattering_potential_full_length 
                 - self.scattering_potential_alternate
             )
         return delta / self.scattering_potential_full_length
@@ -201,6 +204,10 @@ class MosaicsResult(BaseModel):
         default_cc, alt_cc = self.as_ndarrays()
         adjustment_factors = self.expected_correlation_decreases()
 
-        scores = (alt_cc / adjustment_factors) / default_cc[:, None]
+        
+        if self.alternate_template_results[0].added_chains:
+            scores= (alt_cc / adjustment_factors) / default_cc[:, None]
+        else:
+            scores = (alt_cc / adjustment_factors) / default_cc[:, None]
 
         return scores

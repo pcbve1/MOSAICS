@@ -335,11 +335,6 @@ class MosaicsManager(BaseModel):
         inverted = not self.sim_removed_atoms_only
         num_iters = self.template_iterator.num_alternate_structures
         alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
-        if self.template_iterator.type == "added_template":  # setting a flag so mosaics_result can be calculated differently
-            added_chains = True
-        else: 
-            added_chains = False
-
         alternate_template_results = []
         for chains, residues, atom_indices in tqdm.tqdm(
             alt_template_iter,
@@ -378,7 +373,6 @@ class MosaicsManager(BaseModel):
                 sim_removed_atoms_only=self.sim_removed_atoms_only,
                 scattering_potential_full_length=default_sc_pot,
                 scattering_potential_alternate=alt_sc_pot,
-                added_chains=added_chains,
             )
             alternate_template_results.append(res)
 

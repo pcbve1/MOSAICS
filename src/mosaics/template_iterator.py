@@ -370,7 +370,7 @@ class BaseTemplateIterator(BaseModel):
 
         return total_scattering_potential
     
-    def get_default_template_idxs(self) -> torch.Tensor:
+    def get_default_template_idxs(self, all_atoms: bool = True) -> torch.Tensor:
         """Return the atom indices corresponding to the default template"""
         default_df = self.structure_df.copy()
         default_df.set_index("original_index")
@@ -762,7 +762,7 @@ class AddedTemplateIterator(BaseTemplateIterator):
         unique_chain_ids = [chain for chain in self.structure_df["chain"].unique() if chain[0] in self.added_startswith]
         return len(unique_chain_ids)
     
-    def get_default_template_idxs(self) -> torch.Tensor:
+    def get_default_template_idxs(self, all_atoms: bool = False) -> torch.Tensor:
         """Removes all added chain indices and simulates the default 
         
         Added chains must start with something in self.added_startswith
@@ -772,25 +772,32 @@ class AddedTemplateIterator(BaseTemplateIterator):
         torch.Tensor
         tensor of the atom indices to simulate to produce the default template
         """
-        default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain[0] in self.added_startswith]
-        default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
-        default_df = default_df.set_index("original_index")
+        
+        if all_atoms: 
+            default_df = self.structure_df.copy()
+            default_df.set_index("original_index")
+        else: 
+            default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain[0] in self.added_startswith]
+            default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
+            default_df = default_df.set_index("original_index")
         return torch.tensor(default_df.index)
     
     def get_template_scattering_potential(
         self, atom_idxs: torch.Tensor | np.ndarray = None
     ) -> float:
         """Get the mass (in amu) of a template structure given atom indexes. Default template does not contain alt chains"""
+        default_idxs = self.get_default_template_idxs().numpy()
         if atom_idxs is None:
-            atom_idxs = self.get_default_template_idxs().numpy()
+            atom_idxs = default_idxs
 
         if isinstance(atom_idxs, torch.Tensor):
             #I'll want all the idxs from the structure_df
             df = self.structure_df
             added_chain_ids = [chain for chain in df["chain"].unique() if chain[0] in self.added_startswith]
-            added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()
-            atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())]
-            
+            added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()['original_index']
+            atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())].tolist()
+            atom_idxs.extend(default_idxs)
+            atom_idxs = np.unique(atom_idxs)
 
         total_scattering_potential = 0
         atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
@@ -828,7 +835,7 @@ class AddedTemplateIterator(BaseTemplateIterator):
             for chain in chains_to_remove:
                 residue_ids = subset_df[subset_df["chain"]==chain]["residue_id"]
                 residue_ids = residue_ids.unique().tolist()
-                chain_ids = [chain_id] * len(residue_ids)
+                chain_ids = [chain] * len(residue_ids)
                 removed_chains.extend(chain_ids)
                 removed_residues.extend(residue_ids)
             merge_df = pd.DataFrame({"chain": removed_chains, "residue_id": removed_residues})
@@ -837,8 +844,9 @@ class AddedTemplateIterator(BaseTemplateIterator):
 
             # Get the atom indexes for the current window (atoms that should be removed)
             atom_idxs = df_window.index
+            print("iterator indexes:",len(atom_idxs))
 
             if inverted:
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
 
-            yield chain_ids, residue_ids, torch.tensor(atom_idxs)
+            yield removed_chains, removed_residues, torch.tensor(atom_idxs)

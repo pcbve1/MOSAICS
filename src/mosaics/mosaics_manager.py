@@ -23,7 +23,7 @@ from .cross_correlation_core import cross_correlate_particle_stack
 from .mosaics_result import AlternateTemplateResult, MosaicsResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
 
-vol_export_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_volume_investigation/chain_volume"
+vol_export_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_volume_investigation/3_chains_h_only"
 
 class MosaicsManager(BaseModel):
     """Class for importing, running, and exporting MOSAICS program data.
@@ -91,7 +91,6 @@ class MosaicsManager(BaseModel):
         device: torch.device,
         counter,
         batch_size: int = 2048,
-
     ) -> torch.Tensor:
         """Inner loop function for running the MOSAICS program.
 
@@ -334,8 +333,12 @@ class MosaicsManager(BaseModel):
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
-        # this is an issue!
         default_sc_pot = self.template_iterator.get_template_scattering_potential(None) 
+
+        # get a default template volume here again. 
+        default_template = self.simulator.run(
+            atom_indices=self.template_iterator.get_default_template_idxs(all_atoms=True), device=str(device))
+
         print("default_sc_pot", default_sc_pot)
         print("Default template done!")
         ######################################################

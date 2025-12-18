@@ -353,7 +353,7 @@ class BaseTemplateIterator(BaseModel):
     ) -> float:
         """Get the mass (in amu) of a template structure given atom indexes."""
         if atom_idxs is None:
-            atom_idxs = np.arange(len(self.structure_df))
+            atom_idxs = self.get_default_template_idxs()
 
         if isinstance(atom_idxs, torch.Tensor):
             atom_idxs = atom_idxs.numpy()
@@ -366,11 +366,13 @@ class BaseTemplateIterator(BaseModel):
             potentials = torch.sum(potentials).item()
             total_scattering_potential += potentials * count
 
+        
+
         return total_scattering_potential
     
     def get_default_template_idxs(self) -> torch.Tensor:
         """Return the atom indices corresponding to the default template"""
-        default_df = self.structure_df
+        default_df = self.structure_df.copy()
         default_df.set_index("original_index")
         return torch.tensor(default_df.index)
 
@@ -472,7 +474,7 @@ class ChainTemplateIterator(BaseTemplateIterator):
         unique_chain_ids = subset_df["chain"].unique()
 
         for chain_id in unique_chain_ids:
-            print(chain_id)
+            print("deleting chain", chain_id)
             residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
             residue_ids = residue_ids.unique().tolist()
 
@@ -783,7 +785,12 @@ class AddedTemplateIterator(BaseTemplateIterator):
             atom_idxs = self.get_default_template_idxs().numpy()
 
         if isinstance(atom_idxs, torch.Tensor):
-            atom_idxs = atom_idxs.numpy()
+            #I'll want all the idxs from the structure_df
+            df = self.structure_df
+            added_chain_ids = [chain for chain in df["chain"].unique() if chain[0] in self.added_startswith]
+            added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()
+            atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())]
+            
 
         total_scattering_potential = 0
         atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
@@ -792,6 +799,7 @@ class AddedTemplateIterator(BaseTemplateIterator):
             potentials = get_a_param([atom]) # pass in list of atoms, since for 2 letters, the param thinks you're passing in a list
             potentials = torch.sum(potentials).item()
             total_scattering_potential += potentials * count
+        
 
         return total_scattering_potential
     
@@ -813,11 +821,17 @@ class AddedTemplateIterator(BaseTemplateIterator):
         # set unique chains as those without the 
         unique_chain_ids = [chain for chain in subset_df["chain"].unique() if chain[0] in self.added_startswith]
         for chain_id in unique_chain_ids:
-            residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
-            residue_ids = residue_ids.unique().tolist()
-
-            chain_ids = [chain_id] * len(residue_ids)
-            merge_df = pd.DataFrame({"chain": chain_ids, "residue_id": residue_ids})
+            chains_to_remove = [chain for chain in unique_chain_ids if chain != chain_id]
+            print(f"Removing chains {chains_to_remove}")
+            removed_residues = []
+            removed_chains = []
+            for chain in chains_to_remove:
+                residue_ids = subset_df[subset_df["chain"]==chain]["residue_id"]
+                residue_ids = residue_ids.unique().tolist()
+                chain_ids = [chain_id] * len(residue_ids)
+                removed_chains.extend(chain_ids)
+                removed_residues.extend(residue_ids)
+            merge_df = pd.DataFrame({"chain": removed_chains, "residue_id": removed_residues})
             df_window = subset_df.merge(merge_df)
             df_window = df_window.set_index("original_index")
 

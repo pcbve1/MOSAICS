@@ -745,11 +745,11 @@ class AddedTemplateIterator(BaseTemplateIterator):
         Discriminator field for differentiating between template iterator types.
     added_startswith : list[str]
         specified characters that all added chain names start with.
-        Default is ["_"]
+        Default is a list of special characters ["_", "+", "-", ".", "$", "%", "^", "&", "@", "#", "*", "<", ">", "(", ")", "[", "]"]
     """
 
     type: ClassVar[Literal["added_template"]] = "added_template"
-    added_startswith: list[str] = Field(default_factory=lambda: ["_"])
+    added_startswith: list[str] = Field(default_factory=lambda: ["_", "+", "-", ".", "$", "%", "^", "&", "@", "#", "*", "<", ">", "(", ")", "[", "]"])
     
 
     def __init__(self, added_startswith: list[str] | None = None, **data):  # need to initialize the default start character
@@ -791,11 +791,11 @@ class AddedTemplateIterator(BaseTemplateIterator):
             atom_idxs = default_idxs
 
         if isinstance(atom_idxs, torch.Tensor):
-            #I'll want all the idxs from the structure_df
+            # I'll want all the idxs from the structure_df
             df = self.structure_df
             added_chain_ids = [chain for chain in df["chain"].unique() if chain[0] in self.added_startswith]
             added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()['original_index']
-            atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())].tolist()
+            atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())].tolist() # takes the actual indexes of the atoms added.
             atom_idxs.extend(default_idxs)
             atom_idxs = np.unique(atom_idxs)
 

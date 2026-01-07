@@ -3,7 +3,6 @@
 import warnings
 from typing import Literal, Union
 import mmdf
-import mrcfile
 import numpy as np
 import roma
 import torch
@@ -22,8 +21,6 @@ from ttsim3d.models import Simulator
 from .cross_correlation_core import cross_correlate_particle_stack
 from .mosaics_result import AlternateTemplateResult, MosaicsResult
 from .template_iterator import BaseTemplateIterator, instantiate_template_iterator
-
-vol_export_dir = "/home/brose/lab_projects/MOSAICS_test/templates/alt_volume_investigation/3_chains_h_only"
 
 class MosaicsManager(BaseModel):
     """Class for importing, running, and exporting MOSAICS program data.
@@ -89,7 +86,6 @@ class MosaicsManager(BaseModel):
         default_volume: torch.Tensor,
         atom_indices: torch.Tensor,
         device: torch.device,
-        counter,
         batch_size: int = 2048,
     ) -> torch.Tensor:
         """Inner loop function for running the MOSAICS program.
@@ -122,10 +118,6 @@ class MosaicsManager(BaseModel):
         # removed get simulated rather than the atoms which should be kept.
         if self.sim_removed_atoms_only:
             alternate_volume = default_volume - alternate_volume
-        fpath = f"{vol_export_dir}/alt_template_added_density_chain_{counter}.mrc"
-        with mrcfile.new(fpath, overwrite=True) as f:
-            f.set_data(alternate_volume.numpy().astype(np.float16))
-        print(f"exported volume to mrc at {fpath}")
 
         alternate_volume = torch.fft.fftshift(alternate_volume)
         alternate_volume_dft = torch.fft.rfftn(alternate_volume, dim=(-3, -2, -1))
@@ -220,11 +212,6 @@ class MosaicsManager(BaseModel):
         # Simulate the default (full-length) template volume
         default_template = self.simulator.run(
             atom_indices=self.template_iterator.get_default_template_idxs(), device=str(device))  
-        default_fpath = f"{vol_export_dir}/default_template.mrc"
-        with mrcfile.new(default_fpath, overwrite=True) as f:
-            f.set_data(default_template.numpy().astype(np.float16))
-        print(f"exported default volume to mrc at {default_fpath}")
-
         
         # Use the built-in processing functionality from Leopard-EM to compute
         # the filtered particle images (in Fourier space) and the projective filters.
@@ -305,7 +292,6 @@ class MosaicsManager(BaseModel):
             raise ValueError(
                 f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
             )
-        print("simulating default template...")
         if use_cache_file is not None:
             (
                 rot_mat,
@@ -339,8 +325,6 @@ class MosaicsManager(BaseModel):
         default_template = self.simulator.run(
             atom_indices=self.template_iterator.get_default_template_idxs(all_atoms=True), device=str(device))
 
-        print("default_sc_pot", default_sc_pot)
-        print("Default template done!")
         ######################################################
         ### 2. Iteration over alternate (truncated) models ###
         ######################################################
@@ -352,7 +336,6 @@ class MosaicsManager(BaseModel):
         num_iters = self.template_iterator.num_alternate_structures
         alt_template_iter = self.template_iterator.alternate_template_iter(inverted)
         alternate_template_results = []
-        counter = 0
         for chains, residues, atom_indices in tqdm.tqdm(
             alt_template_iter,
             total=num_iters,
@@ -375,16 +358,12 @@ class MosaicsManager(BaseModel):
                     projective_filters=projective_filters,
                     default_volume=default_template,
                     atom_indices=atom_indices,
-                    counter=counter,
                     device=device,
                 )
             alt_cc = alt_cc.cpu().numpy()
             alt_sc_pot = self.template_iterator.get_template_scattering_potential(
                 atom_indices
             )
-
-            print(f"alt sc_pot {counter}", alt_sc_pot)
-            counter += 1
 
             res = AlternateTemplateResult(
                 cross_correlation=alt_cc,

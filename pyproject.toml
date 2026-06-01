@@ -48,7 +48,7 @@ dependencies = [
     "tqdm",
     "ttsim3d",
     "teamtomo-basemodel",
-    "Leopard-EM==v1.0",
+    "Leopard-EM>=v1.0",
 ]
 
 [tool.hatch.metadata]

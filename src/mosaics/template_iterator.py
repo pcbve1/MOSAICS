@@ -3,12 +3,11 @@
 from abc import abstractmethod
 from collections.abc import Iterator
 from typing import Annotated, Any, ClassVar, Literal
+import warnings
 
 import numpy as np
 import pandas as pd
 import torch
-import mmdf
-from ttsim3d.models import Simulator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from teamtomo_basemodel import ExcludedDataFrame
 from ttsim3d.scattering_potential import get_a_param
@@ -547,7 +546,11 @@ class ResidueTemplateIterator(BaseTemplateIterator):
         """
         # Check that all the chains are present in the chain_order list
         if set(chain_order) != set(self.structure_df["chain"].unique()):
-            raise ValueError("Chain order must contain all chains in the structure.")
+            warnings.warn(
+                "The provided chain order does not contain all chains within the "
+                "structure. If this was intentional (e.g. to tile using only a subset "
+                "of chains in the structure) then ignore this warning."
+            )
 
         self._chain_order = chain_order
 

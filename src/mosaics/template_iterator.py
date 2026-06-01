@@ -791,7 +791,6 @@ class AddedTemplateIterator(BaseTemplateIterator):
             atom_idxs = default_idxs
 
         if isinstance(atom_idxs, torch.Tensor):
-            # I'll want all the idxs from the structure_df
             df = self.structure_df
             added_chain_ids = [chain for chain in df["chain"].unique() if chain[0] in self.added_startswith]
             added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()['original_index']
@@ -825,7 +824,6 @@ class AddedTemplateIterator(BaseTemplateIterator):
         
         subset_df = self.subset_df_on_residues_and_atoms()
         subset_df = subset_df.reset_index(drop=True)
-        # set unique chains as those without the 
         unique_chain_ids = [chain for chain in subset_df["chain"].unique() if chain[0] in self.added_startswith]
         for chain_id in unique_chain_ids:
             chains_to_remove = [chain for chain in unique_chain_ids if chain != chain_id]

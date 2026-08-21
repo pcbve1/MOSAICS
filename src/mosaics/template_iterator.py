@@ -2,13 +2,13 @@
 
 from abc import abstractmethod
 from collections.abc import Iterator
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Union
 import warnings
 
 import numpy as np
 import pandas as pd
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from teamtomo_basemodel import ExcludedDataFrame
 from ttsim3d.scattering_potential import get_a_param
 
@@ -208,6 +208,8 @@ def instantiate_template_iterator(data: dict) -> "BaseTemplateIterator":
         return ResidueTemplateIterator(**data)
     elif iterator_type == "added_template":
         return AddedTemplateIterator(**data)
+    elif iterator_type == "specific_chain":
+        return SpecificChainTemplateIterator(**data)
     else:
         raise ValueError(f"Invalid template iterator type: {iterator_type}")
 
@@ -444,21 +446,42 @@ class RandomAtomTemplateIterator(BaseTemplateIterator):
 
 
 class ChainTemplateIterator(BaseTemplateIterator):
-    """Iterates over each chain in the structure and removes specified atoms from it.
+    """Iterates over each chain or a selected chain in the structure and removes specified atoms from it.
 
     Attributes
     ----------
     type : Literal["chain"]
         Discriminator field for differentiating between template iterator types.
+    chain_ids : list[str]
+        If populated, denotes the chains to be removed. When empty or None, sets all chains to be removed. Default is None.
     """
 
     type: ClassVar[Literal["chain"]] = "chain"
+    chain_ids: Union[list[str], None] = None
 
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+
+        unique_chains = list(self.structure_df["chain"].unique())
+        # Checks that all chains passed by the user are present in the template. 
+        if self.chain_ids:
+            absent_chains = [
+                chain_id
+                for chain_id in self.chain_ids
+                if chain_id not in unique_chains
+            ]
+            if absent_chains:
+                raise ValueError(
+                    f"Chains {absent_chains} are not present in the template."
+                )
+        else:
+            self.chain_ids = unique_chains
+    
     @property
     def num_alternate_structures(self) -> int:
         """Get the number of alternate structures (i.e. number of chains)."""
-        return len(self.structure_df["chain"].unique())
-
+        return len(self.chain_ids)
+            
     def alternate_template_iter(
         self, inverted: bool = True
     ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
@@ -470,11 +493,11 @@ class ChainTemplateIterator(BaseTemplateIterator):
             If 'True', return the indexes of atoms to remove rather than keep.
         """
         subset_df = self.subset_df_on_residues_and_atoms()
-        unique_chain_ids = subset_df["chain"].unique()
 
-        for chain_id in unique_chain_ids:
-            print("deleting chain", chain_id)
+        for chain_id in self.chain_ids:
+            print(chain_id)
             residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
+            
             residue_ids = residue_ids.unique().tolist()
 
             chain_ids = [chain_id] * len(residue_ids)
@@ -509,50 +532,36 @@ class ResidueTemplateIterator(BaseTemplateIterator):
         Discriminator field for differentiating between template iterator types.
     randomize_chain_order : bool
         If 'True', randomize the order of chains in the structure. Default is 'False'.
+    chain_ids : list[str]
+        If populated, denotes the chains to be removed. When empty or None, sets all chains to be removed. Default is None.
     """
 
     type: ClassVar[Literal["residue"]] = "residue"
     num_residues_removed: Annotated[int, Field(gt=0)]
     residue_increment: Annotated[int, Field(gt=0)]
+    chain_ids: Union[list[str] , None] = None
     randomize_chain_order: bool = False
-
-    _chain_order: list[str]
 
     def __init__(self, **data: Any):
         super().__init__(**data)
-
-        # The unique method should retain default order
-        self._chain_order = self.structure_df["chain"].unique()
+        # The unique method should retain default order. 
+        unique_chains = list(self.structure_df["chain"].unique())
+        # check if all chains are present in the dataframe
+        if self.chain_ids:
+            absent_chains = [
+                chain_id
+                for chain_id in self.chain_ids
+                if chain_id not in unique_chains
+            ]
+            if absent_chains:
+                raise ValueError(
+                    f"Chains {absent_chains} are not present in the template."
+                )
+        else:
+            self.chain_ids = unique_chains
         if self.randomize_chain_order:
-            np.random.shuffle(self._chain_order)
+            np.random.shuffle(self.chain_ids)
 
-    def set_chain_order(self, chain_order: list[str]) -> None:
-        """Set the order of chains to iterate over.
-
-        Parameters
-        ----------
-        chain_order : list[str]
-            List of chain identifiers, in desired order, to use when iterating
-            over the structure.
-
-        Raises
-        ------
-        ValueError
-            If the chain order does not contain all chains in the structure.
-
-        Returns
-        -------
-        None
-        """
-        # Check that all the chains are present in the chain_order list
-        if set(chain_order) != set(self.structure_df["chain"].unique()):
-            warnings.warn(
-                "The provided chain order does not contain all chains within the "
-                "structure. If this was intentional (e.g. to tile using only a subset "
-                "of chains in the structure) then ignore this warning."
-            )
-
-        self._chain_order = chain_order
 
     @property
     def num_alternate_structures(self) -> int:
@@ -586,7 +595,7 @@ class ResidueTemplateIterator(BaseTemplateIterator):
         # Chunk the df into groups based on chain and re-stich together in order
         # This will ensure that the chain order is respected
         df_list = []
-        for chain in self._chain_order:
+        for chain in self.chain_ids:
             df_list.append(subset_df[subset_df["chain"] == chain])
         ordered_df = pd.concat(df_list)
 
@@ -851,3 +860,109 @@ class AddedTemplateIterator(BaseTemplateIterator):
                 atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
 
             yield removed_chains, removed_residues, torch.tensor(atom_idxs)
+class SpecificChainTemplateIterator(BaseTemplateIterator):
+    """Iterates over each chain in the structure and removes specified atoms from it.
+
+    Attributes
+    ----------
+    type : Literal["specific_chain"]
+        Discriminator field for differentiating between template iterator types.
+    chain_list : list[str]
+        list of chain IDs in the Pdb file to be erased. 
+    """
+
+    type: ClassVar[Literal["specific_chain"]] = "specific_chain"
+    chain_list: list[str]
+    
+    @model_validator(mode='after')
+    def validate_chains(self):
+        for chain in self.chain_list:
+            if not chain in self.structure_df['chain'].unique():
+                raise ValueError(f"Chain {chain} is not present in the structure!!!")
+        return self
+
+    @property
+    def num_alternate_structures(self) -> int:
+        """Get the number of alternate structures (i.e. number of chains)."""
+        return len(self.chain_list)
+    
+    # def get_default_template_idxs(self, all_atoms: bool = False) -> torch.Tensor:
+    #     """Removes all added chain indices and simulates the default 
+    
+
+    #     Returns
+    #     -------
+    #     torch.Tensor
+    #     tensor of the atom indices to simulate to produce the default template
+    #     """
+        
+    #     if all_atoms: 
+    #         default_df = self.structure_df.copy()
+    #         default_df.set_index("original_index")
+    #     else: 
+    #         default_chains = [chain for chain in self.structure_df["chain"].unique() if not chain[0] in self.chain_list]
+    #         default_df = self.structure_df[self.structure_df['chain'].isin(default_chains)].copy()
+    #         default_df = default_df.set_index("original_index")
+    #     return torch.tensor(default_df.index)
+    
+    # def get_template_scattering_potential(
+    #     self, atom_idxs: torch.Tensor | np.ndarray = None
+    # ) -> float:
+    #     """Get the mass (in amu) of a template structure given atom indexes. Default template does not contain alt chains"""
+    #     default_idxs = self.get_default_template_idxs().numpy()
+    #     if atom_idxs is None:
+    #         atom_idxs = default_idxs
+
+    #     if isinstance(atom_idxs, torch.Tensor):
+    #         df = self.structure_df
+    #         added_chain_ids = [chain for chain in df["chain"].unique() if chain[0] in self.chain_list]
+    #         added_chain_idxs = df[df["chain"].isin(added_chain_ids)].copy()['original_index']
+    #         atom_idxs = added_chain_idxs[~added_chain_idxs.isin(atom_idxs.numpy())].tolist() # takes the actual indexes of the atoms added.
+    #         atom_idxs.extend(default_idxs)
+    #         atom_idxs = np.unique(atom_idxs)
+
+    #     total_scattering_potential = 0
+    #     atom_counts = self.structure_df.iloc[atom_idxs]["element"].value_counts()
+    #     for atom, count in atom_counts.items():
+    #         atom = atom.upper()
+    #         potentials = get_a_param([atom]) # pass in list of atoms, since for 2 letters, the param thinks you're passing in a list
+    #         potentials = torch.sum(potentials).item()
+    #         total_scattering_potential += potentials * count
+        
+
+    #     return total_scattering_potential
+    def alternate_template_iter(
+        self, inverted: bool = True
+    ) -> Iterator[tuple[list[str | None], list[int | None], torch.Tensor]]:
+        """Iterator over chain, residue, and atom indices removed for alternates.
+
+        Parameters
+        ----------
+        inverted : bool
+            If 'True', return the indexes of atoms to remove rather than keep.
+        """
+        subset_df = self.subset_df_on_residues_and_atoms()
+
+        for chain_id in self.chain_list:
+            print("deleting chain", chain_id)
+            residue_ids = subset_df[subset_df["chain"] == chain_id]["residue_id"]
+            residue_ids = residue_ids.unique().tolist()
+
+            chain_ids = [chain_id] * len(residue_ids)
+
+            # Merge the DataFrame to keep only positions where the chain and residue
+            # pairs match the current window
+            # NOTE: When the dataframe is merged, the row indexes are overwritten...
+            # We use a dummy column to keep track of the original indexes by re-indexing
+            # the dataframe after the merge.
+            merge_df = pd.DataFrame({"chain": chain_ids, "residue_id": residue_ids})
+            df_window = subset_df.merge(merge_df)
+            df_window = df_window.set_index("original_index")
+
+            # Get the atom indexes for the current window (atoms that should be removed)
+            atom_idxs = df_window.index
+
+            if inverted:
+                atom_idxs = np.setdiff1d(np.arange(len(self.structure_df)), atom_idxs)
+
+            yield chain_ids, residue_ids, torch.tensor(atom_idxs)

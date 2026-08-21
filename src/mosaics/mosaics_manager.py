@@ -8,13 +8,6 @@ import roma
 import torch
 import tqdm
 import yaml  # type: ignore
-from leopard_em.pydantic_models.config import PreprocessingFilters
-from leopard_em.pydantic_models.data_structures import ParticleStack
-from leopard_em.pydantic_models.utils import (
-    _setup_ctf_kwargs_from_particle_stack,
-    calculate_ctf_filter_stack_full_args,
-    setup_images_filters_particle_stack,
-)
 from pydantic import BaseModel
 from ttsim3d.models import Simulator
 from torch_fourier_slice import project_3d_to_2d
@@ -30,6 +23,8 @@ SAME_BOX_SIZE_WARNING = (
     "to be determined. Cannot find shifts with the same sizes. Please set "
     "'extracted_box_size' to be ~15-20 pct larger than 'original_template_size'."
 )
+
+volume_output_dir = "/home/brose/lab_projects/MOSAICS_paper_2026/eEF2_eEF1A_discrimination_test/data/mosaics_tests"
 
 
 def _center_images_by_correlations(
@@ -130,7 +125,7 @@ class MosaicsManager(BaseModel):
         If False (typical), then determine the (x, y) position of each correlogram peak
         before proceeding. Default is False. NOTE: When this is set to False,
         the extracted box size should be larger than the maximum expected particle
-        shift.
+        shift
     """
 
     simulator: Simulator
@@ -158,12 +153,13 @@ class MosaicsManager(BaseModel):
 
         # Load the pdb file from the Simulator into a DataFrame
         pdb_df = mmdf.read(data["simulator"]["pdb_filepath"])
+        # removes hydrogens from pdb_df if option is enabled
+        if data['simulator'].get('remove_hydrogens', True):
+            pdb_df = pdb_df[pdb_df['element'] != 'H'].reset_index()
         data["template_iterator"]["structure_df"] = pdb_df
-
         # Create the template iterator using the factory method
         template_iterator = instantiate_template_iterator(data["template_iterator"])
         data["template_iterator"] = template_iterator
-
         return cls(**data)
 
     def _mosaics_inner_loop(
@@ -175,6 +171,7 @@ class MosaicsManager(BaseModel):
         default_volume: torch.Tensor,
         atom_indices: torch.Tensor,
         device: torch.device,
+        counter: int, 
         batch_size: int = 2048,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Inner loop function for running the MOSAICS program.
@@ -267,12 +264,15 @@ class MosaicsManager(BaseModel):
             raise ValueError(
                 f"Invalid gpu_id: {gpu_id}. Must be 'cpu' or a non-negative integer."
             )
+        print("loading dataset...")
+        print("Rpl38_version")
 
         # Load or process the dataset
         if cache_path is not None:
             self.dataset.load_from_cache(cache_path, device)
         else:
             self.dataset.process_inputs(device, self.simulator)
+        print(self.simulator.pixel_spacing)
 
         # Extract processed variables from dataset
         rotation_matrices = self.dataset.rotation_matrices
@@ -284,15 +284,14 @@ class MosaicsManager(BaseModel):
         #####################################################################
         ### 1. Calculate default (full length) cross corr and projections ###
         #####################################################################
-
+        print("calculating full-length projections...")
         full_length_projections = _get_full_length_projections(
             default_volume=default_template,
             rotation_matrices=rotation_matrices,
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
-        default_sc_pot = self.template_iterator.get_template_scattering_potential(None) 
-
+        print('Cross-correlating particle stack...')
         default_cc, _ = cross_correlate_particle_stack(
             particle_stack_images=particle_images,
             perfect_projection_images=None,  # Don't need auto-correlation
@@ -329,7 +328,7 @@ class MosaicsManager(BaseModel):
                     particle_images=particle_images,
                     original_template_size=orig_template_size,
                 )
-
+        print("calculating overlap...")
         default_cc, default_overlap = cross_correlate_particle_stack(
             particle_stack_images=particle_images,
             perfect_projection_images=full_length_projections,
@@ -350,11 +349,13 @@ class MosaicsManager(BaseModel):
         alternate_template_iterator = self.template_iterator.alternate_template_iter(
             invert_iterator
         )
+        num_alternate_structures = self.template_iterator.num_alternate_structures
 
+        counter = 0
         alternate_template_results = []
         for chains, residues, atom_indices in tqdm.tqdm(
             alternate_template_iterator,
-            total=num_iters,
+            total=num_alternate_structures,
             desc="Iterating over alternate models",
         ):
             if len(atom_indices) == 0:
@@ -376,6 +377,7 @@ class MosaicsManager(BaseModel):
                     default_volume=default_template,
                     atom_indices=atom_indices,
                     device=device,
+                    counter=counter,
                 )
 
             alternate_cc = alternate_cc.cpu().numpy()
@@ -395,6 +397,7 @@ class MosaicsManager(BaseModel):
                 scattering_potential_alternate=alternate_scattering_potential,
             )
             alternate_template_results.append(this_result)
+            counter += 1
 
         return MosaicsResult(
             default_cross_correlation=default_cc.cpu().numpy(),

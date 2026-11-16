@@ -3,8 +3,6 @@
 import warnings
 from typing import Literal, Union
 import mmdf
-import numpy as np
-import roma
 import torch
 import tqdm
 import yaml  # type: ignore
@@ -281,6 +279,7 @@ class MosaicsManager(BaseModel):
         default_template = self.dataset.template_volume
         default_template_dft = self.dataset.template_volume_dft
 
+
         #####################################################################
         ### 1. Calculate default (full length) cross corr and projections ###
         #####################################################################
@@ -317,10 +316,10 @@ class MosaicsManager(BaseModel):
 
             if _box_size_is_same:
                 warnings.warn(
-                    warning_message=SAME_BOX_SIZE_WARNING,
+                    message=SAME_BOX_SIZE_WARNING,
                     category=RuntimeWarning,
                     stacklevel=2,
-                )
+                    )
             else:
                 orig_template_size = self.dataset.particle_stack.original_template_size
                 _, particle_images = _center_images_by_correlations(
@@ -337,6 +336,8 @@ class MosaicsManager(BaseModel):
             projective_filters=projective_filters,
             batch_size=batch_size,
         )
+
+
 
         ######################################################
         ### 3. Iteration over alternate (truncated) models ###
@@ -379,7 +380,6 @@ class MosaicsManager(BaseModel):
                     device=device,
                     counter=counter,
                 )
-
             alternate_cc = alternate_cc.cpu().numpy()
             alternate_overlap = alternate_overlap.cpu().numpy()
             alternate_scattering_potential = (
